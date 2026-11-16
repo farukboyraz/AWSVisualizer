@@ -11,3 +11,6 @@ dist/
 node_modules.*/
 # Local working notes - not part of the repository
 DOCUMENTATION.md
+# AI assistant settings - local only
+.claude/
+CLAUDE.local.md
