@@ -1,0 +1,13 @@
+node_modules/
+.next/
+.build/
+dist/
+*.tsbuildinfo
+.DS_Store
+.swiftpm/xcode/xcuserdata/
+.swiftpm/xcode/package.xcworkspace/xcuserdata/
+*.log
+# Local backups of node_modules made while testing installs
+node_modules.*/
+# Local working notes - not part of the repository
+DOCUMENTATION.md

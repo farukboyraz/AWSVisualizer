@@ -1,0 +1,17 @@
+{
+  "name": "aws-visualizer",
+  "version": "0.9.2",
+  "private": true,
+  "description": "AWS Visualizer - Native Desktop App (macOS today, Windows/iOS/Android planned)",
+  "workspaces": [
+    "packages/api"
+  ],
+  "scripts": {
+    "mac": "node start-mac.js",
+    "mac:debug": "node start-mac.js --debug",
+    "dev:mac": "node start-mac.js --debug",
+    "dev:api": "cd packages/api && npx tsx src/index.ts",
+    "typecheck:api": "cd packages/api && npx tsc --noEmit",
+    "build:api": "cd packages/api && npx tsc"
+  }
+}
