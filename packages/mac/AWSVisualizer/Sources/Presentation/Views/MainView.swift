@@ -49,7 +49,6 @@ struct MainView: View {
                     expandedWidth: terminalExpandedWidth,
                     tools: devTools
                 )
-                .id(devTools.map(\.id).joined(separator: ","))
             }
         }
         // Re-check which profiles are signed in when the app comes back to
@@ -61,6 +60,20 @@ struct MainView: View {
         }
         .onReceive(NotificationCenter.default.publisher(for: .awsRequestNotAuthorized)) { _ in
             Task { await appState.refreshProfiles(using: api) }
+        }
+        // A login made in a terminal (`aws sso login`) writes ~/.aws/sso/cache:
+        // re-check right away instead of showing "expired" until the next focus change.
+        .onAppear { AWSSignInWatcher.shared.start() }
+        .onReceive(NotificationCenter.default.publisher(for: .awsSignInFilesChanged)) { _ in
+            Task { await appState.refreshProfiles(using: api, force: true, minimumInterval: 5) }
+        }
+        // And once more the moment the current profile's sign-in runs out.
+        .task(id: appState.currentProfileInfo?.expiresAt) {
+            guard let expiresAt = appState.currentProfileInfo?.expiresAt else { return }
+            let wait = expiresAt.timeIntervalSinceNow + 5
+            guard wait > 0 else { return }
+            try? await Task.sleep(nanoseconds: UInt64(wait * 1_000_000_000))
+            if !Task.isCancelled { await appState.refreshProfiles(using: api, force: true) }
         }
         .navigationTitle(windowTitle)
         .animation(.easeInOut(duration: 0.2), value: isSidebarCollapsed)

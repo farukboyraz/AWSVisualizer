@@ -14,6 +14,11 @@ struct AWSProfile: Identifiable, Hashable {
     /// usually it just means their sso-session needs a fresh login.
     let isValid: Bool
     let identity: CallerIdentity?
+    /// AWS couldn't be reached at the last check (throttled / offline):
+    /// `isValid` is the sidecar's best guess, not a fresh answer.
+    var isUnverified = false
+    /// When the SSO sign-in runs out, when known.
+    var expiresAt: Date?
 
     var id: String { name }
 
@@ -45,10 +50,26 @@ struct AWSProfile: Identifiable, Hashable {
         self.ssoSession = checkResult.ssoSession
         self.isValid = checkResult.valid
         self.identity = checkResult.identity
+        self.isUnverified = checkResult.unverified ?? false
+        self.expiresAt = checkResult.expiresAt.flatMap(Self.parseDate)
+    }
+
+    private static func parseDate(_ text: String) -> Date? {
+        let f = ISO8601DateFormatter()
+        f.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        if let date = f.date(from: text) { return date }
+        f.formatOptions = [.withInternetDateTime]
+        if let date = f.date(from: text) { return date }
+        // ~/.aws/sso/cache writes e.g. "2026-11-17T18:00:00UTC" too.
+        let legacy = DateFormatter()
+        legacy.locale = Locale(identifier: "en_US_POSIX")
+        legacy.timeZone = TimeZone(identifier: "UTC")
+        legacy.dateFormat = "yyyy-MM-dd'T'HH:mm:ss'UTC'"
+        return legacy.date(from: text)
     }
 
     static func == (lhs: AWSProfile, rhs: AWSProfile) -> Bool {
-        lhs.name == rhs.name && lhs.isValid == rhs.isValid && lhs.region == rhs.region
+        lhs.name == rhs.name && lhs.isValid == rhs.isValid && lhs.region == rhs.region && lhs.expiresAt == rhs.expiresAt && lhs.isUnverified == rhs.isUnverified
     }
 
     func hash(into hasher: inout Hasher) {
@@ -72,6 +93,8 @@ struct ProfileCheckResult: Codable {
     let error: String?
     let accountId: String?
     let roleName: String?
+    var unverified: Bool?
+    var expiresAt: String?
 }
 
 struct AccessibleEnvironment: Codable, Identifiable {

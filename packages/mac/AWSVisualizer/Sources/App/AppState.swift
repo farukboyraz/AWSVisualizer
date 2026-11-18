@@ -207,20 +207,6 @@ enum AppLanguage: String, CaseIterable {
         }
     }
 
-    var minServiceWarningTitle: String {
-        switch self {
-        case .en: "At least one service required"
-        case .tr: "En az bir servis gerekli"
-        }
-    }
-
-    var minServiceWarningMessage: String {
-        switch self {
-        case .en: "You need to keep at least one service selected."
-        case .tr: "En az bir servisi seçili tutmanız gerekiyor."
-        }
-    }
-
     var closeTabLabel: String {
         switch self {
         case .en: "Close Tab"
@@ -435,6 +421,9 @@ final class AppState {
     var historyLayout: LayoutMode = .singlePage
     /// Settings › Display › Dashboard.
     var dashboardPrefs = DashboardPrefs.defaults
+    /// The dashboard asked this session whether to install the packages its
+    /// sections need (asked at most once per launch).
+    var dashboardPackagePromptShown = false
     /// The local API's version (GET /api/config `app.version`) - shown in Settings › About.
     var apiVersion: String?
     /// Where a dashboard card (or an action's result) wants to go; the

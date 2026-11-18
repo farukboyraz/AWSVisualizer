@@ -59,6 +59,7 @@ struct TabBarView: View {
             : (appState.serviceCatalog.first { $0.id == tab.serviceID }?.name ?? tab.serviceID)
         let entry = appState.serviceCatalog.first { $0.id == tab.serviceID }
         let icon = tab.serviceID == dashboardServiceID ? "square.grid.2x2" : (entry?.icon ?? "square")
+        let canClose = appState.tabs.count > 1
         return HStack(spacing: 6) {
             Image(systemName: icon)
                 .font(.caption)
@@ -66,25 +67,26 @@ struct TabBarView: View {
             Text(name)
                 .font(.caption)
                 .lineLimit(1)
-            if appState.tabs.count > 1 {
-                Button {
+            if canClose {
+                CloseButton(compactSize: 18, help: appState.language.closeTabLabel) {
                     appState.closeTab(tab.id)
-                } label: {
-                    Image(systemName: "xmark")
-                        .font(.system(size: 9, weight: .bold))
                 }
-                .buttonStyle(.plain)
-                .opacity(isActive ? 0.7 : 0.35)
             }
         }
+        .frame(minHeight: 18)
         .foregroundStyle(isActive ? Color.primary : Color.secondary)
-        .padding(.horizontal, 10)
-        .padding(.vertical, 6)
+        .padding(.leading, 10)
+        .padding(.trailing, canClose ? 5 : 10)
+        .padding(.vertical, 4)
         .background(isActive ? Color.accentColor.opacity(0.15) : Color.clear)
         .clipShape(RoundedRectangle(cornerRadius: 8))
         .contentShape(Rectangle())
         .onTapGesture {
             appState.activateTab(tab.id)
+        }
+        // Middle click anywhere on the tab (its button included) closes it.
+        .background {
+            if canClose { MiddleClickMonitor { appState.closeTab(tab.id) } }
         }
         .contextMenu {
             Button(appState.language.closeTabLabel) {

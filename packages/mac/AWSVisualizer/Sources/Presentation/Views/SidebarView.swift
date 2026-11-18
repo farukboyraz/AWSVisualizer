@@ -22,8 +22,22 @@ private struct SidebarGroup {
     let defaultExpanded: Bool
 }
 
+/// A right-click action that asks first.
+private enum SidebarConfirmation: Identifiable {
+    case removeFavorite(AWSServiceCatalogEntry)
+    case removeFromSidebar(AWSServiceCatalogEntry)
+
+    var id: String {
+        switch self {
+        case .removeFavorite(let e): "fav-\(e.id)"
+        case .removeFromSidebar(let e): "hide-\(e.id)"
+        }
+    }
+}
+
 struct SidebarView: View {
     @Environment(AppState.self) private var appState
+    @Environment(\.apiService) private var api
     @Environment(\.colorScheme) private var colorScheme
     @Binding var isCollapsed: Bool
     let collapsedWidth: CGFloat
@@ -40,6 +54,9 @@ struct SidebarView: View {
     @State private var isSearching = false
     @State private var searchQuery = ""
     @FocusState private var searchFieldFocused: Bool
+    @State private var confirmation: SidebarConfirmation?
+    @State private var addingCardFor: AWSServiceCatalogEntry?
+    @State private var actionError: String?
 
     private let favoritesGroupKey = "__favorites__"
     private let otherGroupKey = "__other__"
@@ -148,6 +165,94 @@ struct SidebarView: View {
         .frame(width: isCollapsed ? collapsedWidth + extraGutter : expandedWidth)
         .background(Theme.sidebarBackground(colorScheme))
         .animation(.easeInOut(duration: 0.15), value: extraGutter)
+        .alert(
+            appState.language.confirmTitle,
+            isPresented: Binding(get: { confirmation != nil }, set: { if !$0 { confirmation = nil } }),
+            presenting: confirmation
+        ) { item in
+            Button(appState.language.confirmYes, role: .destructive) { confirm(item) }
+            Button(appState.language.confirmNo, role: .cancel) {}
+        } message: { item in
+            switch item {
+            case .removeFavorite(let entry): Text(appState.language.sidebarRemoveFavoriteMessage(entry.name))
+            case .removeFromSidebar(let entry): Text(appState.language.sidebarHideMessage(entry.name))
+            }
+        }
+        .alert(actionError ?? "", isPresented: Binding(get: { actionError != nil }, set: { if !$0 { actionError = nil } })) {
+            Button(appState.language.okButtonTitle) {}
+        }
+        .sheet(item: $addingCardFor) { entry in
+            DashboardCardEditor(
+                card: nil,
+                presetService: entry.id,
+                language: appState.language,
+                profiles: appState.profiles.isEmpty ? [appState.currentProfile] : appState.profiles.map(\.name),
+                defaultProfile: appState.currentProfile,
+                defaultRegion: appState.currentRegion,
+                onSave: { card in
+                    addingCardFor = nil
+                    Task {
+                        do { try await appState.addDashboardCard(card, using: api) } catch { actionError = error.friendlyMessage }
+                    }
+                },
+                onCancel: { addingCardFor = nil }
+            )
+        }
+    }
+
+    // MARK: Opening and the right-click menu
+
+    /// Opening a page folds the sidebar away so the page gets the room;
+    /// the sidebar button (or a click on the icon strip) brings it back.
+    private func open(_ serviceID: String, newTab: Bool = false) {
+        if newTab { appState.openInAdditionalTab(serviceID) } else { appState.openInNewTab(serviceID) }
+        if !isCollapsed {
+            isSearching = false
+            withAnimation(.easeInOut(duration: 0.2)) { isCollapsed = true }
+        }
+    }
+
+    private func menuContext(_ entry: AWSServiceCatalogEntry) -> SidebarServiceMenu.Context {
+        SidebarServiceMenu.Context(
+            entry: entry,
+            isDashboard: entry.id == dashboardEntry.id,
+            isFavorite: appState.favoriteServiceIDs.contains(entry.id),
+            canOpenInNewTab: appState.maxTabs > 1 && appState.tabs.count < appState.maxTabs,
+            canAddCard: appState.dashboardPrefs.cards.count < DashboardPrefs.maxCards,
+            canRemoveFromSidebar: appState.selectedServiceIDs.count > 1,
+            language: appState.language
+        )
+    }
+
+    private func serviceMenu(_ entry: AWSServiceCatalogEntry) -> some View {
+        SidebarServiceMenu(context: menuContext(entry)) { perform($0, on: entry) }
+    }
+
+    private func perform(_ action: SidebarServiceAction, on entry: AWSServiceCatalogEntry) {
+        switch action {
+        case .open: open(entry.id)
+        case .openInNewTab: open(entry.id, newTab: true)
+        case .addFavorite: runAction { try await appState.setFavorite(entry.id, true, using: api) }
+        case .removeFavorite: confirmation = .removeFavorite(entry)
+        case .addCard: addingCardFor = entry
+        case .copyName:
+            NSPasteboard.general.clearContents()
+            NSPasteboard.general.setString(entry.name, forType: .string)
+        case .removeFromSidebar: confirmation = .removeFromSidebar(entry)
+        }
+    }
+
+    private func confirm(_ item: SidebarConfirmation) {
+        switch item {
+        case .removeFavorite(let entry): runAction { try await appState.setFavorite(entry.id, false, using: api) }
+        case .removeFromSidebar(let entry): runAction { try await appState.removeFromSidebar(entry.id, using: api) }
+        }
+    }
+
+    private func runAction(_ work: @escaping () async throws -> Void) {
+        Task {
+            do { try await work() } catch { actionError = error.friendlyMessage }
+        }
     }
 
     private var header: some View {
@@ -233,13 +338,19 @@ struct SidebarView: View {
         List(selection: Binding<String?>(
             get: { highlightedRowKey },
             set: { newValue in
-                if let newValue { appState.openInNewTab(serviceID(fromRowKey: newValue)) }
+                // Group headers (Favorites, Other, categories) carry their
+                // ForEach id as an implicit tag - selecting one must not
+                // "open" a service by that name; their own button toggles them.
+                guard let newValue, !sidebarGroups.contains(where: { $0.key == newValue }) else { return }
+                open(serviceID(fromRowKey: newValue))
             }
         )) {
             Label(dashboardEntry.name, systemImage: dashboardEntry.icon)
                 .font(.title3.weight(.semibold))
                 .padding(.vertical, 3)
+                .sidebarHover()
                 .tag(dashboardEntry.id)
+                .contextMenu { serviceMenu(dashboardEntry) }
 
             if showsFlatList {
                 ForEach(searchMatchedEntries) { entry in
@@ -283,13 +394,14 @@ struct SidebarView: View {
                 Spacer(minLength: 0)
             }
             .contentShape(Rectangle())
+            .sidebarHover()
         }
         .buttonStyle(.plain)
+        .selectionDisabled()
     }
 
-    /// Favoriting itself only happens in the Select Services popup now - the
-    /// star here (Favorites group only) is a read-only indicator of why the
-    /// row is showing up twice, not another place to toggle it.
+    /// The star (Favorites group only) shows why the row is there; favorites
+    /// are toggled from the right-click menu or the Select Services popup.
     private func serviceRow(_ entry: AWSServiceCatalogEntry, showsFavoriteStar: Bool, groupKey: String?) -> some View {
         HStack {
             Label { Text(entry.name) } icon: { ServiceIcon(entry: entry) }
@@ -300,7 +412,9 @@ struct SidebarView: View {
                     .foregroundStyle(.yellow)
             }
         }
+        .sidebarHover()
         .tag(rowKey(groupKey: groupKey, serviceID: entry.id))
+        .contextMenu { serviceMenu(entry) }
     }
 
     private var collapsedList: some View {
@@ -309,8 +423,8 @@ struct SidebarView: View {
                 ForEach(entries) { entry in
                     let isActive = entry.id == appState.selectedService
                     Button {
+                        // Stays collapsed: the page opens, the strip stays out of the way.
                         appState.openInNewTab(entry.id)
-                        withAnimation(.easeInOut(duration: 0.2)) { isCollapsed = false }
                     } label: {
                         ServiceIcon(entry: entry, size: 15)
                             .frame(width: 34, height: 34)
@@ -320,7 +434,9 @@ struct SidebarView: View {
                         isActive ? Color.accentColor.opacity(0.18) : .clear,
                         in: RoundedRectangle(cornerRadius: 8)
                     )
+                    .sidebarHover(cornerRadius: 8, inset: 0)
                     .help(entry.name)
+                    .contextMenu { serviceMenu(entry) }
                 }
             }
             .padding(.vertical, 6)

@@ -10,27 +10,38 @@ import Charts
 ///   the panel header, default in Settings › Display › Dashboard.
 /// - A dashed average line labelled at its right end, axis titles and a
 ///   legend underneath.
-/// - Hover: a dashed crosshair, the period's axis label in a pill, the
-///   other periods dimmed, and a tooltip with a header band and a
-///   Previous / Selected / Change table per series (cost going up is red,
-///   down is green) whose arrow points at the period; "Details" opens the
-///   full breakdown.
+/// - Single color (the switch in the panel header; its default in Settings ›
+///   Display › Dashboard): only the total, in green; the tooltip and the
+///   period window still show each service in its own series color.
+/// - Hover: only while the pointer is on a bar (its own width and height)
+///   or within 12 pt of a point - not "the nearest period" anywhere in the
+///   plot, which jumped to the next period halfway between two. Then a
+///   dashed crosshair, the period's axis label in a pill, the other periods
+///   dimmed and a tooltip (header band, each series' amount and share)
+///   whose arrow points at the period.
+/// - Click on a bar / point: `onSelectPeriod` (the period's detail window).
 struct DashboardCostChart: View {
     let cost: DashboardModel.Cost
     let style: DashboardPrefs.ChartStyle
     let language: AppLanguage
     /// Snapshot only: shows the tooltip of this period without hovering.
     var pinned: Date? = nil
-    var onDetails: (DashboardDetail) -> Void = { _ in }
+    /// One color: the total only (Settings › Display › Dashboard).
+    var singleColor = false
+    /// Off while the spend settings popover is open: no tooltip, no highlight.
+    var isInteractive = true
+    /// A bar / point was clicked.
+    var onSelectPeriod: (Date) -> Void = { _ in }
 
     @State private var selected: Date?
     @State private var hover = TooltipHoverState()
 
-    private var shownSelection: Date? { pinned ?? (hover.isVisible ? selected : nil) }
+    private var shownSelection: Date? { pinned ?? (isInteractive && hover.isVisible ? selected : nil) }
 
-    static let palette = ["#3B82F6", "#10B981", "#F59E0B", "#8B5CF6", "#94A3B8"].map { Color(hex: $0) }
     /// Lines / points also draw the total, so the average line has its counterpart.
     static let totalColor = Color(hex: "#EC4899")
+    /// The single-color chart's color.
+    static let singleColorValue = Color(hex: "#10B981")
     private let averageColor = Color(hex: "#D97706")
     private let crosshairColor = Color(hex: "#3B82F6")
 
@@ -54,15 +65,40 @@ struct DashboardCostChart: View {
     }
 
     /// Bars stack to the total by themselves; lines and points add it as its own series.
-    private var drawsTotal: Bool { style != .bar && !cost.breakdown.isEmpty }
-    private var drawnSeries: [String] { (drawsTotal ? [language.dashTotal] : []) + seriesNames }
+    private var drawsTotal: Bool { style != .bar && !cost.breakdown.isEmpty && !singleColor }
+    private var drawnSeries: [String] { singleColor ? [language.dashTotal] : (drawsTotal ? [language.dashTotal] : []) + seriesNames }
+    /// What a series is drawn in.
     private func color(_ name: String) -> Color {
+        if singleColor { return Self.singleColorValue }
         if name == language.dashTotal && drawsTotal { return Self.totalColor }
-        let index = seriesNames.firstIndex(of: name) ?? 0
-        return Self.palette[min(index, Self.palette.count - 1)]
+        return seriesColor(name)
+    }
+
+    /// A series' own color - the service's fixed one (`DashboardServiceColor`),
+    /// grey for "Other"; also in single-color mode, for the tooltip.
+    private func seriesColor(_ name: String) -> Color {
+        if name == language.dashOther { return DashboardServiceColor.other }
+        if name == language.dashTotal { return Self.singleColorValue }
+        return DashboardServiceColor.color(for: name)
+    }
+
+    /// Per service of the series (and "Other"), each period - never the total.
+    private var seriesPoints: [Point] {
+        let names = seriesNames
+        guard !cost.breakdown.isEmpty else { return cost.daily.map { Point(date: $0.date, series: names[0], amount: $0.amount) } }
+        let top = names.filter { $0 != language.dashOther }
+        return cost.daily.flatMap { day -> [Point] in
+            let services = cost.services(on: day.date)
+            var rows = top.map { name in Point(date: day.date, series: name, amount: services.first { $0.name == name }?.amount ?? 0) }
+            if names.contains(language.dashOther) {
+                rows.append(Point(date: day.date, series: language.dashOther, amount: max(0, day.amount - rows.reduce(0) { $0 + $1.amount })))
+            }
+            return rows
+        }
     }
 
     private var points: [Point] {
+        if singleColor { return cost.daily.map { Point(date: $0.date, series: language.dashTotal, amount: $0.amount) } }
         let names = seriesNames
         guard !cost.breakdown.isEmpty else { return cost.daily.map { Point(date: $0.date, series: names[0], amount: $0.amount) } }
         let top = names.filter { $0 != language.dashOther }
@@ -164,9 +200,14 @@ struct DashboardCostChart: View {
                         .onContinuousHover { phase in
                             switch phase {
                             case .active(let location): select(at: location, proxy: proxy, plot: plot)
-                            case .ended: hover.set(target: false)
+                            case .ended:
+                                hover.set(target: false)
+                                setPointer(false)
                             }
                         }
+                        .gesture(SpatialTapGesture().onEnded { tap in
+                            if isInteractive, let date = period(at: tap.location, proxy: proxy, plot: plot) { onSelectPeriod(date) }
+                        })
                     if let date = shownSelection, let anchor = anchor(for: date, proxy: proxy, plot: plot) {
                         axisPill(date).position(x: anchor.x, y: plot.maxY + 13)
                         tooltip(date, anchor: anchor, width: geo.size.width)
@@ -175,6 +216,12 @@ struct DashboardCostChart: View {
             }
         }
         .onChange(of: hover.isVisible) { _, visible in if !visible { selected = nil } }
+        .onChange(of: isInteractive) { _, interactive in
+            if !interactive {
+                hover.set(target: false)
+                setPointer(false)
+            }
+        }
         .zIndex(hover.isVisible ? 10 : 0)
         .environment(\.locale, language.locale)
         .animation(.easeOut(duration: 0.15), value: selected)
@@ -183,22 +230,66 @@ struct DashboardCostChart: View {
 
     // MARK: Hover
 
-    /// The nearest period to the pointer inside the plot.
+    @State private var isPointing = false
+
+    /// The period under the pointer - only when it's on that period's bar
+    /// or point, otherwise the tooltip goes away.
     private func select(at location: CGPoint, proxy: ChartProxy, plot: CGRect) {
-        guard plot.insetBy(dx: -6, dy: -6).contains(location), let date: Date = proxy.value(atX: location.x - plot.minX),
-              let nearest = cost.daily.min(by: { abs($0.date.timeIntervalSince(date)) < abs($1.date.timeIntervalSince(date)) }) else {
+        guard isInteractive, let date = period(at: location, proxy: proxy, plot: plot) else {
             hover.set(target: false)
+            setPointer(false)
             return
         }
-        selected = nearest.date
+        selected = date
         hover.set(target: true)
+        setPointer(true)
+    }
+
+    private func setPointer(_ on: Bool) {
+        guard on != isPointing else { return }
+        isPointing = on
+        (on ? NSCursor.pointingHand : NSCursor.arrow).set()
+    }
+
+    /// Bars: the pointer inside a bar (its drawn width, from the top of the
+    /// stack to the axis; at least 8 pt tall so tiny bars can be hit).
+    /// Lines / points: within 12 pt of one of the period's points.
+    private func period(at location: CGPoint, proxy: ChartProxy, plot: CGRect) -> Date? {
+        guard plot.insetBy(dx: -6, dy: -6).contains(location) else { return nil }
+        let calendar = Calendar.utc
+        for point in cost.daily {
+            if style == .bar {
+                guard let next = calendar.date(byAdding: unit, value: 1, to: point.date),
+                      let x0 = proxy.position(forX: point.date), let x1 = proxy.position(forX: next),
+                      let top = proxy.position(forY: point.amount), let bottom = proxy.position(forY: 0.0) else { continue }
+                let ratio: CGFloat = cost.monthly ? 0.55 : 0.75
+                let center = plot.minX + (x0 + x1) / 2
+                let half = max(abs(x1 - x0) * ratio / 2, 3)
+                let yTop = plot.minY + min(top, bottom - 8)
+                let yBottom = plot.minY + bottom
+                if abs(location.x - center) <= half, location.y >= yTop - 2, location.y <= yBottom + 2 { return point.date }
+            } else if let anchor = anchor(for: point.date, proxy: proxy, plot: plot) {
+                let amounts = points.filter { $0.date == point.date }.map(\.amount)
+                for amount in amounts {
+                    guard let y = proxy.position(forY: amount) else { continue }
+                    let dx = location.x - anchor.x, dy = location.y - (plot.minY + y)
+                    if dx * dx + dy * dy <= 144 { return point.date }
+                }
+            }
+        }
+        return nil
     }
 
     /// Where the period is drawn: its center, at the top of what's drawn
     /// there (the stacked total for bars, the highest series otherwise).
     private func anchor(for date: Date, proxy: ChartProxy, plot: CGRect) -> CGPoint? {
         guard let point = cost.daily.first(where: { $0.date == date }) else { return nil }
-        let center = cost.monthly ? date.addingTimeInterval(15 * 86_400) : (style == .bar ? date.addingTimeInterval(43_200) : date)
+        let center: Date
+        if style == .bar, let next = Calendar.utc.date(byAdding: unit, value: 1, to: date) {
+            center = Date(timeIntervalSince1970: (date.timeIntervalSince1970 + next.timeIntervalSince1970) / 2)
+        } else {
+            center = cost.monthly ? date.addingTimeInterval(15 * 86_400) : date
+        }
         let top = style == .bar ? point.amount : (points.filter { $0.date == date }.map(\.amount).max() ?? point.amount)
         guard let x = proxy.position(forX: center), let y = proxy.position(forY: top) else { return nil }
         return CGPoint(x: plot.minX + x, y: plot.minY + y)
@@ -237,10 +328,9 @@ struct DashboardCostChart: View {
                         language: language,
                         anchorX: anchor.x,
                         containerWidth: width,
-                        arrowOnTop: !above,
-                        onDetails: { onDetails(.costPoint(date: date)) }
+                        arrowOnTop: !above
                     )
-                    .onHover { hover.set(bubble: $0) }
+                    .allowsHitTesting(false)
                     .alignmentGuide(HorizontalAlignment.center) { d in anchor.x - DashboardCostTooltip.left(anchorX: anchor.x, width: d.width, containerWidth: width) }
                     .alignmentGuide(VerticalAlignment.bottom) { d in d[.bottom] + 10 }
                     .alignmentGuide(VerticalAlignment.top) { d in d[.top] - 10 }
@@ -250,19 +340,20 @@ struct DashboardCostChart: View {
         }
     }
 
-    /// Each series' amount in the period (no comparison with the previous one).
+    /// Each series' amount in the period, in its own color - also when the
+    /// chart itself is single-color.
     private func tooltipRows(_ index: Int) -> [DashboardCostTooltip.Row] {
         let date = cost.daily[index].date
-        let all = points
+        let all = seriesPoints
         return seriesNames.map { name in
-            DashboardCostTooltip.Row(name: label(name), color: color(name), amount: all.first { $0.date == date && $0.series == name }?.amount ?? 0)
+            DashboardCostTooltip.Row(name: label(name), color: seriesColor(name), amount: all.first { $0.date == date && $0.series == name }?.amount ?? 0)
         }
     }
 }
 
 /// The tooltip of the spend chart: a header band with the period and its
 /// total, each series' amount and share, a small arrow at the period and a
-/// "Details" link.
+/// "click for details" hint (it doesn't take the pointer itself).
 struct DashboardCostTooltip: View {
     struct Row: Identifiable {
         let name: String
@@ -280,7 +371,6 @@ struct DashboardCostTooltip: View {
     let anchorX: CGFloat
     let containerWidth: CGFloat
     let arrowOnTop: Bool
-    var onDetails: () -> Void
 
     private let header = LinearGradient(colors: [Color(hex: "#1E3A8A"), Color(hex: "#312E81")], startPoint: .leading, endPoint: .trailing)
 
@@ -317,14 +407,13 @@ struct DashboardCostTooltip: View {
             .padding(.horizontal, 12)
             .padding(.vertical, 4)
 
-            HStack {
-                Button(action: onDetails) {
-                    Text(language.dashDetails).font(.caption.weight(.semibold)).underline().foregroundStyle(Color.accentColor)
-                }
-                .buttonStyle(.plain)
-                .onHover { inside in if inside { NSCursor.pointingHand.push() } else { NSCursor.pop() } }
+            // The bar / point itself opens the details (no link to chase).
+            HStack(spacing: 5) {
+                Image(systemName: "cursorarrow.click").font(.caption2)
+                Text(language.dashChartClickHint).font(.caption2)
                 Spacer()
             }
+            .foregroundStyle(.secondary)
             .padding(.horizontal, 12)
             .padding(.bottom, 9)
         }
@@ -346,5 +435,14 @@ struct DashboardCostTooltip: View {
         }
         .shadow(color: .black.opacity(0.22), radius: 12, y: 5)
         .fixedSize()
+    }
+}
+
+private extension Calendar {
+    /// Gregorian in UTC - Cost Explorer's days and months.
+    static var utc: Calendar {
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = TimeZone(identifier: "UTC")!
+        return calendar
     }
 }

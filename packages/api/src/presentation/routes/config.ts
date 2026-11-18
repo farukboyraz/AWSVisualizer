@@ -1,5 +1,6 @@
 import { Router } from 'express';
 import { loadConfig, updateDefaultRegion, saveMaxTabs, saveTerminalPanelEnabled, saveKiroCliPanelEnabled, saveDynamoDbAutoColumnWidth, saveDynamoDbItemView, DYNAMODB_ITEM_VIEWS, saveCodeTheme, CODE_THEMES, saveViewPreferences, LAYOUT_MODES, FILE_ICON_THEMES, HISTORY_LAYOUTS, saveButtonColors, saveDefaultIde, readConfigFileRaw, saveDevTools, readDashboardPrefs, saveDashboardPrefs, DASHBOARD_WIDGETS, COST_VIEWS, COST_MONTH_RANGES, DASHBOARD_COLOR_STYLES, DASHBOARD_SERVICE_LAYOUTS, REFRESH_MINUTES_MAX, MAX_CARDS, readDashboardCard } from '../../config/index.js';
+import { layoutProblems, readSizes, sizeProblems } from '../../config/dashboard-layout.js';
 
 import { findTemplate, validateParams } from '../../infrastructure/dashboard-cards/registry.js';
 
@@ -114,11 +115,14 @@ router.put('/config/dashboard', async (req, res) => {
     if (body.cost?.months !== undefined && !(COST_MONTH_RANGES as readonly number[]).includes(body.cost.months)) problems.push(`cost.months must be one of ${COST_MONTH_RANGES.join(', ')}`);
     if (body.cost?.chartStyle !== undefined && !['bar', 'line', 'points'].includes(body.cost.chartStyle)) problems.push('cost.chartStyle must be one of bar, line, points');
     if (body.cost?.showEstimate !== undefined && typeof body.cost.showEstimate !== 'boolean') problems.push('cost.showEstimate must be a boolean');
+    if (body.cost?.singleColor !== undefined && typeof body.cost.singleColor !== 'boolean') problems.push('cost.singleColor must be a boolean');
     if (body.colorStyle !== undefined && !(DASHBOARD_COLOR_STYLES as readonly string[]).includes(body.colorStyle)) problems.push(`colorStyle must be one of ${DASHBOARD_COLOR_STYLES.join(', ')}`);
     if (body.hideEmptyServices !== undefined && typeof body.hideEmptyServices !== 'boolean') problems.push('hideEmptyServices must be a boolean');
     if (body.servicesLayout !== undefined && !(DASHBOARD_SERVICE_LAYOUTS as readonly string[]).includes(body.servicesLayout)) problems.push(`servicesLayout must be one of ${DASHBOARD_SERVICE_LAYOUTS.join(', ')}`);
     if (body.refreshMinutes !== undefined && !(Number.isInteger(body.refreshMinutes) && body.refreshMinutes >= 0 && body.refreshMinutes <= REFRESH_MINUTES_MAX)) problems.push(`refreshMinutes must be a whole number from 0 to ${REFRESH_MINUTES_MAX}`);
     if (body.refreshOnOpen !== undefined && typeof body.refreshOnOpen !== 'boolean') problems.push('refreshOnOpen must be a boolean');
+    if (body.sizes !== undefined) problems.push(...sizeProblems(body.sizes));
+    if (body.layout !== undefined) problems.push(...layoutProblems(body.layout, readSizes(body.sizes)));
     if (body.cards !== undefined) {
       if (!Array.isArray(body.cards) || body.cards.length > MAX_CARDS) problems.push(`cards must be a list of at most ${MAX_CARDS} cards`);
       else

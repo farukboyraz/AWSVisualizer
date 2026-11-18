@@ -24,6 +24,8 @@ struct DeleteButton: View {
     var isLoading: Bool = false
     var isDisabled: Bool = false
     var help: String?
+    /// Replaces the shared "This data will be deleted" text (e.g. to name what goes).
+    var confirmationMessage: String?
     var action: () -> Void
 
     @State private var showConfirmation = false
@@ -36,6 +38,7 @@ struct DeleteButton: View {
         isLoading: Bool = false,
         isDisabled: Bool = false,
         help: String? = nil,
+        confirmationMessage: String? = nil,
         action: @escaping () -> Void
     ) {
         self.title = title
@@ -45,6 +48,7 @@ struct DeleteButton: View {
         self.isLoading = isLoading
         self.isDisabled = isDisabled
         self.help = help
+        self.confirmationMessage = confirmationMessage
         self.action = action
     }
 
@@ -69,7 +73,7 @@ struct DeleteButton: View {
             Button(appState.language.yesButtonTitle, role: .destructive) { action() }
             Button(appState.language.noButtonTitle, role: .cancel) {}
         } message: {
-            Text(appState.language.deleteConfirmationMessage)
+            Text(confirmationMessage ?? appState.language.deleteConfirmationMessage)
         }
     }
 }

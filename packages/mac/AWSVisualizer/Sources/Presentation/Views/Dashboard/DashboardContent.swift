@@ -1,8 +1,8 @@
 import SwiftUI
 
 /// The dashboard layout, top to bottom - every block is its own component
-/// (DashboardSections.swift) and can be switched off in the header or in
-/// Settings › Display › Dashboard:
+/// (DashboardSections.swift, DashboardKPIs.swift); the layout editor
+/// (and Settings › Display › Dashboard) moves, resizes and hides them:
 /// 1. header - title, profile / region / account, updated time, customize, refresh
 /// 2. KPI cards - resources, active services, spend, attention
 /// 3. resources by category (donut) + largest services (bars)
@@ -26,6 +26,8 @@ struct DashboardContent: View {
     @Binding var costMonths: Int
     /// Bars / lines / points - switched in the chart's header (default from Settings).
     @Binding var chartStyle: DashboardPrefs.ChartStyle
+    /// One color - switched in the chart's header (default from Settings).
+    @Binding var singleColor: Bool
     /// The user's cards for this profile (the dashboard filters them).
     var visibleCards: [DashboardCard]? = nil
     var cardStates: [String: DashboardCardState] = [:]
@@ -38,20 +40,31 @@ struct DashboardContent: View {
 
     /// Services whose count is still on its way.
     var loadingServices: Set<String> = []
-    /// A section switched on / off from the header.
+    /// A section shown / hidden in the layout editor.
     var onToggleSection: (DashboardPrefs.Widget, Bool) -> Void = { _, _ in }
+    /// Services whose packages are missing: their sections stay hidden,
+    /// with an Install button on their tile in the layout editor.
+    var missingPackages: Set<String> = []
+    var packageName: (String) -> String = { $0 }
+    var onInstallSection: (DashboardPrefs.Widget) -> Void = { _ in }
+    /// Needs attention › Install: the packages of these services.
+    var onInstallServices: ([String]) -> Void = { _ in }
+    /// Saves a new section layout; nil = no layout editor (snapshot mode).
+    var onLayoutChange: ((DashboardLayout) -> Void)? = nil
 
-    /// Opened by a chart tooltip's "Details".
-    @State private var detail: DashboardDetail?
+    @State private var isArranging = false
+
+    /// Opened by a click on a KPI card.
+    @State private var kpiDetail: DashboardKPIDetail?
 
     private func on(_ widget: DashboardPrefs.Widget) -> Bool { prefs.isOn(widget) }
 
     private var ctx: DashboardSectionContext {
-        DashboardSectionContext(model: model, prefs: prefs, language: language, width: width, loadingServices: loadingServices, favorites: favorites, onOpen: onOpen, onDetails: { detail = $0 })
+        DashboardSectionContext(model: model, prefs: prefs, language: language, width: width, loadingServices: loadingServices, favorites: favorites, onOpen: onOpen, onKPI: { kpiDetail = $0 })
     }
 
     private var costSelection: DashboardCostSelection {
-        DashboardCostSelection(view: $costView, month: $costMonth, months: $costMonths, chartStyle: $chartStyle)
+        DashboardCostSelection(view: $costView, month: $costMonth, months: $costMonths, chartStyle: $chartStyle, singleColor: $singleColor)
     }
 
     var body: some View {
@@ -60,26 +73,46 @@ struct DashboardContent: View {
             if !DashboardPrefs.Widget.allCases.contains(where: on) {
                 EmptyStateView(message: language.dashSectionsOff).frame(minHeight: 300)
             }
-            // Each section is its own component and shows its own loading.
-            DashboardKPISection(ctx: ctx, cost: costSelection)
-            if on(.customCards) {
-                DashboardCardsSection(cards: visibleCards ?? prefs.cards, states: cardStates, runResults: runResults, language: language, serviceName: serviceName, actions: cardActions)
+            if isArranging, let onLayoutChange {
+                DashboardLayoutEditor(
+                    layout: prefs.layout, prefs: prefs, language: language, onChange: onLayoutChange,
+                    onToggle: onToggleSection, missingPackages: missingPackages, packageName: packageName, onInstall: onInstallSection
+                ) {
+                    withAnimation(.easeInOut(duration: 0.2)) { isArranging = false }
+                }
+            } else {
+                // The saved rows at their sizes; each section shows its own loading.
+                DashboardRowsView(layout: prefs.layout, isOn: on, width: width, spacing: ctx.spacing) { widget, size in
+                    section(widget, size: size)
+                }
             }
-            DashboardResourceSection(ctx: ctx)
-            DashboardCostSection(ctx: ctx, cost: costSelection)
-            if on(.services) { DashboardServicesSection(ctx: ctx) }
         }
         // Muted: the same palette, less saturated (neutral text is unaffected).
         .saturation(prefs.colorStyle == .muted ? 0.55 : 1)
-        .sheet(item: $detail) { detail in
-            DashboardDetailSheet(detail: detail, model: model, language: language, onOpen: onOpen) { self.detail = nil }
+        .sheet(item: $kpiDetail) { kpi in
+            DashboardKPIDetailSheet(detail: kpi, model: model, language: language, costTitle: costSelection.title(language), onOpen: onOpen, onInstall: onInstallServices) { kpiDetail = nil }
+        }
+    }
+
+    @ViewBuilder private func section(_ widget: DashboardPrefs.Widget, size: DashboardPrefs.WidgetSize) -> some View {
+        switch widget {
+        case .resourcesKpi, .activeKpi, .costKpi, .attentionKpi:
+            DashboardKPIWidget(widget: widget, size: size, ctx: ctx, cost: costSelection)
+        case .customCards:
+            DashboardCardsSection(cards: visibleCards ?? prefs.cards, states: cardStates, runResults: runResults, language: language, serviceName: serviceName, actions: cardActions)
+        case .distribution, .topServices:
+            DashboardResourceWidget(widget: widget, size: size, ctx: ctx)
+        case .costTrend, .costByService:
+            DashboardCostWidget(widget: widget, size: size, ctx: ctx, cost: costSelection)
+        case .services:
+            DashboardServicesSection(ctx: ctx)
         }
     }
 
     // MARK: Header
 
     /// One row: title, then read-only info (profile / region / account /
-    /// updated), then the buttons - sections, customize, refresh.
+    /// updated), then the buttons - layout, customize, refresh.
     private var header: some View {
         HStack(alignment: .center, spacing: 18) {
             VStack(alignment: .leading, spacing: 4) {
@@ -97,7 +130,11 @@ struct DashboardContent: View {
             }
             Divider().frame(height: 30)
             HStack(spacing: 8) {
-                DashboardSectionSwitches(prefs: prefs, language: language, onToggle: onToggleSection)
+                if onLayoutChange != nil {
+                    EditButton(systemImage: "rectangle.3.group", compactSize: 30, help: language.dashArrange) {
+                        withAnimation(.easeInOut(duration: 0.2)) { isArranging.toggle() }
+                    }
+                }
                 OpenButton(language.dsCustomize, systemImage: "slider.horizontal.3", compactSize: 30, action: onCustomize)
                 RefreshButton(compactSize: 30, isLoading: isRefreshing, help: language.dashRefresh, action: onRefresh)
             }

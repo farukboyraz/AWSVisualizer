@@ -19,7 +19,6 @@ struct ServiceSelectionList: View {
 
     @State private var searchText = ""
     @State private var counts: [String: Int?] = [:]
-    @State private var showMinServiceWarning = false
     @State private var showSelectedOnly = false
     @State private var installRequest: InstallRequest?
     @State private var errorItem: InstallStepItem?
@@ -58,11 +57,16 @@ struct ServiceSelectionList: View {
         return groups.keys.sorted().map { key in (key, groups[key]!.sorted { $0.name < $1.name }) }
     }
 
+    /// ALL selects every listed service; when they're all selected it
+    /// clears them (with a search, only the services the search shows).
+    /// An empty list is allowed while editing - Save / Continue stay
+    /// disabled until something is picked again.
     private var allSelectedBinding: Binding<Bool> {
         Binding(
             get: { !filteredEntries.isEmpty && Set(filteredEntries.map { $0.id }).isSubset(of: selection) },
             set: { isOn in
-                if isOn { selection.formUnion(filteredEntries.map { $0.id }) }
+                let ids = filteredEntries.map { $0.id }
+                if isOn { selection.formUnion(ids) } else { selection.subtract(ids) }
             }
         )
     }
@@ -72,16 +76,7 @@ struct ServiceSelectionList: View {
         return Binding(
             get: { !categoryIDs.isEmpty && categoryIDs.isSubset(of: selection) },
             set: { isOn in
-                if isOn {
-                    selection.formUnion(categoryIDs)
-                } else {
-                    let remainder = selection.subtracting(categoryIDs)
-                    if remainder.isEmpty {
-                        showMinServiceWarning = true
-                    } else {
-                        selection = remainder
-                    }
-                }
+                if isOn { selection.formUnion(categoryIDs) } else { selection.subtract(categoryIDs) }
             }
         )
     }
@@ -131,9 +126,15 @@ struct ServiceSelectionList: View {
             }
 
             HStack {
-                Text("\(selection.count) selected · ★ favorites appear at the top of the sidebar")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
+                if selection.isEmpty {
+                    Label(appState.language.serviceSelectionEmpty, systemImage: "exclamationmark.circle")
+                        .font(.caption)
+                        .foregroundStyle(.orange)
+                } else {
+                    Text("\(selection.count) selected · ★ favorites appear at the top of the sidebar")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
                 Spacer()
                 if mode == .settings, !selectedNeedingInstall.isEmpty {
                     NewButton("Install selected (\(selectedNeedingInstall.count))", systemImage: "arrow.down.circle") {
@@ -154,11 +155,6 @@ struct ServiceSelectionList: View {
             }) {
                 errorItem = nil
             }
-        }
-        .alert(appState.language.minServiceWarningTitle, isPresented: $showMinServiceWarning) {
-            Button(appState.language.okButtonTitle) {}
-        } message: {
-            Text(appState.language.minServiceWarningMessage)
         }
     }
 
@@ -186,13 +182,7 @@ struct ServiceSelectionList: View {
             onInstall: { installRequest = InstallRequest(services: [entry.id]) },
             onShowError: { Task { await showFailure(entry) } },
             onToggleSelection: { isOn in
-                if isOn {
-                    selection.insert(entry.id)
-                } else if selection.count > 1 {
-                    selection.remove(entry.id)
-                } else {
-                    showMinServiceWarning = true
-                }
+                if isOn { selection.insert(entry.id) } else { selection.remove(entry.id) }
             },
             onToggleFavorite: { toggleFavorite(entry.id) }
         )

@@ -70,6 +70,12 @@ struct SettingsView: View {
             || (awsConfig != nil && awsConfig != loadedAwsConfig)
     }
 
+    /// ALL can clear a service list while editing; neither list may be saved empty.
+    private var hasEmptyServiceList: Bool {
+        draftSelectedServices.isEmpty
+            || (draftDefaultServices.isEmpty && draftDefaultServices != Set(appState.userDefaultServiceIDs))
+    }
+
     private var dirtyPages: Set<SettingsPage> {
         var pages = Set<SettingsPage>()
         if draftMaxTabs != appState.maxTabs { pages.insert(.general) }
@@ -153,6 +159,10 @@ struct SettingsView: View {
     private var platformsPage: some View {
         VStack(alignment: .leading, spacing: 20) {
             awsConfigSection
+
+            Divider()
+
+            ProfilesSection()
 
             Divider()
 
@@ -417,7 +427,7 @@ struct SettingsView: View {
                         .foregroundStyle(.red)
                 }
 
-                SaveButton("Save Changes", isLoading: isSaving, isDisabled: !isDirty) {
+                SaveButton("Save Changes", isLoading: isSaving, isDisabled: !isDirty || hasEmptyServiceList) {
                     Task { await saveAll() }
                 }
             }

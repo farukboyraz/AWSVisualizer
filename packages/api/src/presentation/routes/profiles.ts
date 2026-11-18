@@ -1,6 +1,8 @@
 import { Router } from 'express';
 import { listAccessibleEnvironments } from '../../infrastructure/aws/sso-accounts.js';
-import { appendProfile } from '../../infrastructure/aws/config-parser.js';
+import { appendProfile, removeProfile } from '../../infrastructure/aws/config-parser.js';
+import { invalidateCredentials } from '../../infrastructure/aws/credential-cache.js';
+import { getProfileSessions, saveProfileSessions } from '../../config/index.js';
 import { handleApiError } from '../../infrastructure/aws/credentials.js';
 
 const router = Router();
@@ -30,6 +32,21 @@ router.post('/profiles', async (req, res) => {
     res.json({ success: true, name });
   } catch (err: any) {
     res.status(400).json({ error: err.message || 'Failed to create profile' });
+  }
+});
+
+// POST /api/profiles/delete { name } - removes the profile from
+// ~/.aws/config (and ~/.aws/credentials); the app asks for confirmation first.
+router.post('/profiles/delete', async (req, res) => {
+  try {
+    const name = typeof req.body?.name === 'string' ? req.body.name : '';
+    removeProfile(name);
+    invalidateCredentials(name);
+    const { [name]: _removed, ...rest } = getProfileSessions();
+    saveProfileSessions(rest);
+    res.json({ success: true, name });
+  } catch (err: any) {
+    res.status(err.status || 400).json({ error: err.message || 'Failed to delete profile' });
   }
 });
 

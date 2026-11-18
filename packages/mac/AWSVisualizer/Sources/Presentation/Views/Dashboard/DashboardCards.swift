@@ -6,6 +6,8 @@ import SwiftUI
 struct DashboardPanel<Content: View, Accessory: View>: View {
     let title: String
     var subtitle: String?
+    /// Next to the title, in parentheses and italics: "(Last 6 months)".
+    var titleDetail: String?
     var icon: String?
     @ViewBuilder var accessory: () -> Accessory
     @ViewBuilder var content: () -> Content
@@ -19,7 +21,12 @@ struct DashboardPanel<Content: View, Accessory: View>: View {
                         .foregroundStyle(.secondary)
                 }
                 VStack(alignment: .leading, spacing: 2) {
-                    Text(title).font(.headline)
+                    HStack(alignment: .firstTextBaseline, spacing: 5) {
+                        Text(title).font(.headline).lineLimit(1)
+                        if let titleDetail {
+                            Text("(\(titleDetail))").font(.subheadline).italic().foregroundStyle(.secondary).lineLimit(1)
+                        }
+                    }
                     if let subtitle {
                         Text(subtitle).font(.caption).foregroundStyle(.secondary)
                     }
@@ -145,6 +152,7 @@ struct DashboardServiceTile: View {
                         .font(.system(size: 15, weight: .bold, design: .rounded))
                         .monospacedDigit()
                         .foregroundStyle((count ?? 0) == 0 ? AnyShapeStyle(.tertiary) : AnyShapeStyle(.primary))
+                        .dashboardLoadingBlur()
                 }
             }
             .frame(width: Self.size, height: Self.size)

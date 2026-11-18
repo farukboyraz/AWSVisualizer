@@ -10,7 +10,8 @@ struct DashboardSectionContext {
     let loadingServices: Set<String>
     var favorites: Set<String> = []
     var onOpen: (String) -> Void = { _ in }
-    var onDetails: (DashboardDetail) -> Void = { _ in }
+    /// A KPI card was clicked.
+    var onKPI: (DashboardKPIDetail) -> Void = { _ in }
 
     var wide: Bool { width >= 1050 }
     var spacing: CGFloat { 16 }
@@ -31,6 +32,8 @@ struct DashboardCostSelection {
     @Binding var month: String
     @Binding var months: Int
     @Binding var chartStyle: DashboardPrefs.ChartStyle
+    /// The chart in one color (switch in the panel header; default from Settings).
+    @Binding var singleColor: Bool
 
     /// "This month" / "October 2026" / "Last 30 days" / "Last 6 months".
     func title(_ language: AppLanguage) -> String {
@@ -47,225 +50,131 @@ struct DashboardCostSelection {
     }
 }
 
-// MARK: - KPI cards
-
-struct DashboardKPISection: View {
-    let ctx: DashboardSectionContext
-    let cost: DashboardCostSelection
-
-    private var language: AppLanguage { ctx.language }
-
-    var body: some View {
-        let shown = [DashboardPrefs.Widget.resourcesKpi, .activeKpi, .costKpi, .attentionKpi].filter(ctx.on)
-        if !shown.isEmpty {
-            let columns = Array(repeating: GridItem(.flexible(), spacing: ctx.spacing), count: ctx.wide ? shown.count : min(2, shown.count))
-            LazyVGrid(columns: columns, spacing: ctx.spacing) {
-                ForEach(shown, id: \.self) { kpi($0) }
-            }
-        }
-    }
-
-    @ViewBuilder private func kpi(_ widget: DashboardPrefs.Widget) -> some View {
-        let model = ctx.model
-        switch widget {
-        case .resourcesKpi:
-            DashboardKPICard(
-                title: language.dashResources,
-                value: DashboardFormat.number(model.totalResources),
-                hint: ctx.countingHint ?? language.dashResourcesHint(model.services.count),
-                icon: "square.stack.3d.up.fill",
-                colors: [Color(hex: "#3B82F6"), Color(hex: "#6366F1")]
-            ) { countingIndicator }
-        case .activeKpi:
-            DashboardKPICard(
-                title: language.dashActive,
-                value: "\(model.activeServices)",
-                hint: ctx.countingHint ?? language.dashActiveHint(model.services.count),
-                icon: "bolt.horizontal.circle.fill",
-                colors: [Color(hex: "#8B5CF6"), Color(hex: "#D946EF")]
-            ) { countingIndicator }
-        case .costKpi:
-            costCard
-        default:
-            attentionCard
-        }
-    }
-
-    @ViewBuilder private var countingIndicator: some View {
-        if ctx.isCounting { ProgressView().controlSize(.small) }
-    }
-
-    @ViewBuilder private var costCard: some View {
-        let title = cost.title(language)
-        switch ctx.model.costState {
-        case .loaded(let c):
-            DashboardKPICard(
-                title: title,
-                value: DashboardFormat.money(c.total, currency: c.currency),
-                hint: (ctx.prefs.cost.showEstimate ? c.monthEndEstimate : nil).map { language.dashEstimate(DashboardFormat.money($0, currency: c.currency)) } ?? DashboardCostSelection.averageText(c, language),
-                icon: "dollarsign.circle.fill",
-                colors: [Color(hex: "#10B981"), Color(hex: "#14B8A6")]
-            ) {
-                if c.daily.count > 1 { DashboardSpendTrend(cost: c, compact: true).frame(height: 30) }
-            }
-        case .loading:
-            DashboardKPICard(title: title, value: "—", hint: language.cardPreviewLoading, icon: "dollarsign.circle.fill", colors: [Color(hex: "#10B981"), Color(hex: "#14B8A6")]) {
-                ProgressView().controlSize(.small)
-            }
-        case .denied:
-            DashboardKPICard(title: title, value: "—", hint: language.dashCostHiddenHint, icon: "lock.fill", colors: [Color(hex: "#94A3B8"), Color(hex: "#64748B")])
-        case .failed, .hidden:
-            DashboardKPICard(title: title, value: "—", hint: language.dashCostFailed, icon: "dollarsign.circle.fill", colors: [Color(hex: "#94A3B8"), Color(hex: "#64748B")])
-        }
-    }
-
-    private var attentionCard: some View {
-        let unreadable = ctx.model.services.filter { $0.count == nil && !$0.needsInstall && !$0.isLoading }.count
-        let install = ctx.model.services.filter(\.needsInstall).count
-        let ok = unreadable + install == 0
-        return DashboardKPICard(
-            title: language.dashAttention,
-            value: "\(unreadable + install)",
-            hint: ctx.countingHint ?? (ok ? language.dashAttentionNone : language.dashAttentionHint(unreadable: unreadable, install: install)),
-            icon: ok ? "checkmark.seal.fill" : "exclamationmark.triangle.fill",
-            colors: ok ? [Color(hex: "#22C55E"), Color(hex: "#16A34A")] : [Color(hex: "#F59E0B"), Color(hex: "#F97316")]
-        ) { countingIndicator }
-    }
-}
-
 // MARK: - Resources by category + largest services
 
-struct DashboardResourceSection: View {
+/// Resources by category (donut) or the largest services, at its size:
+/// small = the ring alone / top 4, medium = ring and legend of 11 / top 8,
+/// large = bigger ring with a two-column legend of 22 / top 16 in two columns.
+struct DashboardResourceWidget: View {
+    let widget: DashboardPrefs.Widget
+    let size: DashboardPrefs.WidgetSize
     let ctx: DashboardSectionContext
 
     var body: some View {
         let language = ctx.language
         let model = ctx.model
-        let donut = DashboardPanel(title: language.dashDistribution, icon: "chart.pie.fill") {
-            if ctx.isCounting { ProgressView().controlSize(.small) }
-        } content: {
-            DashboardCategoryDonut(categories: model.categories, total: model.totalResources, language: language, onDetails: ctx.onDetails)
-        }
-        let top = DashboardPanel(title: language.dashTopServices, icon: "chart.bar.fill") {
-            if ctx.isCounting { ProgressView().controlSize(.small) }
-        } content: {
-            DashboardTopServicesChart(services: model.topServices, language: language, total: model.totalResources, onOpen: ctx.onOpen, onDetails: ctx.onDetails)
-        }
-        switch (ctx.on(.distribution), ctx.on(.topServices)) {
-        case (true, true) where ctx.wide:
-            HStack(alignment: .top, spacing: ctx.spacing) {
-                donut.frame(maxWidth: .infinity)
-                top.frame(maxWidth: .infinity)
+        Group {
+            if widget == .distribution {
+                DashboardPanel(title: language.dashDistribution, icon: "chart.pie.fill") {
+                    DashboardCategoryDonut(
+                        categories: model.categories, total: model.totalResources, language: language,
+                        size: size == .small ? 170 : size == .medium ? 200 : 260,
+                        legendLimit: size == .small ? 0 : size == .medium ? 11 : 22,
+                        legendColumns: size == .large ? 2 : 1
+                    )
+                }
+            } else {
+                let limit = size == .small ? 4 : size == .medium ? 8 : 16
+                let services = Array(model.services.filter { ($0.count ?? 0) > 0 }.sorted { ($0.count ?? 0) > ($1.count ?? 0) }.prefix(limit))
+                DashboardPanel(title: language.dashTopServices, icon: "chart.bar.fill") {
+                    DashboardTopServicesChart(services: services, language: language, onOpen: ctx.onOpen, columns: size == .large ? 2 : 1)
+                }
             }
-            .fixedSize(horizontal: false, vertical: true)
-        case (true, true):
-            donut
-            top
-        case (true, false): donut
-        case (false, true): top
-        default: EmptyView()
         }
+        .dashboardLoading(ctx.isCounting, label: ctx.countingHint)
     }
 }
 
 // MARK: - Spend
 
-struct DashboardCostSection: View {
+/// The spend chart or spend by service. The gear on the chart's panel (on
+/// spend by service when the chart is off) opens every spend filter.
+struct DashboardCostWidget: View {
+    let widget: DashboardPrefs.Widget
+    let size: DashboardPrefs.WidgetSize
     let ctx: DashboardSectionContext
     let cost: DashboardCostSelection
+
+    @State private var isSettingsOpen = false
+    @State private var settingsClosedAt: Date?
 
     private var language: AppLanguage { ctx.language }
 
     var body: some View {
-        if ctx.on(.costTrend) || ctx.on(.costByService) {
+        Group {
             let title = cost.title(language)
-            let trend = DashboardPanel(title: cost.view == .monthly ? language.dashSpendTrendMonthly : language.dashSpendTrend, subtitle: title, icon: "chart.xyaxis.line") {
-                controls
+            let trend = DashboardPanel(title: cost.view == .monthly ? language.dashSpendTrendMonthly : language.dashSpendTrend, titleDetail: title, icon: "chart.xyaxis.line") {
+                settingsButton
             } content: {
-                costBody(height: 300) { c in
+                costBody(height: chartHeight) { c in
                     if c.daily.count > 1 {
                         VStack(alignment: .leading, spacing: 8) {
                             Text(DashboardCostSelection.averageText(c, language)).font(.caption.weight(.medium)).foregroundStyle(.secondary)
-                            DashboardCostChart(cost: c, style: cost.chartStyle, language: language, onDetails: ctx.onDetails).frame(height: 300)
+                            DashboardCostChart(cost: c, style: cost.chartStyle, language: language, singleColor: cost.singleColor, isInteractive: !isSettingsOpen, onSelectPeriod: openPeriod)
+                                .frame(height: chartHeight)
                         }
                     } else {
                         DashboardEmptyChart(icon: "chart.xyaxis.line", message: language.dashNoSpend)
                     }
                 }
             }
-            let byService = DashboardPanel(title: language.dashSpendByService, subtitle: title, icon: "list.bullet.rectangle.fill") {
-                // Without the trend panel the switch lives here.
-                if !ctx.on(.costTrend) { controls }
+            let byService = DashboardPanel(title: language.dashSpendByService, titleDetail: title, icon: "list.bullet.rectangle.fill") {
+                // Without the trend panel the filters live here.
+                if !ctx.on(.costTrend) { settingsButton }
             } content: {
-                costBody(height: 220) { c in DashboardSpendByService(cost: c, language: language, onDetails: ctx.onDetails) }
-            }
-            switch (ctx.on(.costTrend), ctx.on(.costByService)) {
-            case (true, true) where ctx.wide:
-                HStack(alignment: .top, spacing: ctx.spacing) {
-                    trend.frame(maxWidth: .infinity)
-                    byService.frame(width: min(420, ctx.width * 0.38))
+                costBody(height: 220) { c in
+                    DashboardSpendByService(cost: c, language: language, limit: size == .small ? 4 : size == .medium ? 6 : 16, columns: size == .large ? 2 : 1) { service in
+                        // A service: its own spend, period by period. "Other": every service.
+                        ctx.onKPI(service.map(DashboardKPIDetail.costService) ?? .cost)
+                    }
                 }
-                .fixedSize(horizontal: false, vertical: true)
-            case (true, true):
-                trend
-                byService
-            case (true, false): trend
-            default: byService
             }
+            if widget == .costTrend { trend } else { byService }
+        }
+        .dashboardLoading(isLoading)
+    }
+
+    private var chartHeight: CGFloat { size == .large ? 320 : 220 }
+
+    private var isLoading: Bool {
+        if case .loading = ctx.model.costState { return true }
+        return false
+    }
+
+    /// The gear: its popover grows out of it over the dashboard (nothing
+    /// moves or dims) and closes on a click anywhere else.
+    private var settingsButton: some View {
+        SecondaryButton(systemImage: "gearshape", compactSize: 26, help: language.dashSpendSettings) {
+            if isSettingsOpen {
+                isSettingsOpen = false
+            } else if !justClosedSettings {
+                isSettingsOpen = true
+            }
+        }
+        .popover(isPresented: $isSettingsOpen, arrowEdge: .bottom) {
+            DashboardCostSettingsPanel(cost: cost, language: language, showsChartOptions: ctx.on(.costTrend))
+        }
+        .onChange(of: isSettingsOpen) { _, open in
+            if !open { settingsClosedAt = Date() }
         }
     }
 
-    /// Bars / lines / points, like a chart toolbar: icon segments, the current one filled.
-    private var chartStyleSwitch: some View {
-        HStack(spacing: 2) {
-            ForEach(DashboardPrefs.ChartStyle.allCases, id: \.self) { style in
-                Button { cost.chartStyle = style } label: {
-                    Image(systemName: style == .bar ? "chart.bar.fill" : style == .line ? "chart.xyaxis.line" : "chart.dots.scatter")
-                        .font(.system(size: 12, weight: .semibold))
-                        .frame(width: 30, height: 24)
-                        .foregroundStyle(cost.chartStyle == style ? Color.white : Color.secondary)
-                        .background(cost.chartStyle == style ? Color.accentColor : Color.clear, in: RoundedRectangle(cornerRadius: 6, style: .continuous))
-                        .contentShape(Rectangle())
-                }
-                .buttonStyle(.plain)
-                .help(language.chartStyleLabel(style))
-            }
-        }
-        .padding(2)
-        .background(Color.primary.opacity(0.07), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+    /// The click that dismissed the popover (on the gear or on a bar) must
+    /// not also reopen it or open that bar's details.
+    private var justClosedSettings: Bool {
+        settingsClosedAt.map { Date().timeIntervalSince($0) < 0.4 } ?? false
     }
 
-    /// Chart style, then Daily / Monthly / One month with the month or range picker.
-    private var controls: some View {
-        HStack(spacing: 8) {
-            if ctx.on(.costTrend) {
-                chartStyleSwitch
-                Divider().frame(height: 20)
-            }
-            if cost.view == .month {
-                Picker("", selection: cost.$month) {
-                    ForEach(DashboardContent.monthKeys, id: \.self) { Text(language.monthName($0)).tag($0) }
-                }
-                .labelsHidden()
-                .fixedSize()
-                .controlSize(.small)
-            } else if cost.view == .monthly {
-                Picker("", selection: cost.$months) {
-                    ForEach(DashboardPrefs.monthRanges, id: \.self) { Text(language.monthsLabel($0)).tag($0) }
-                }
-                .labelsHidden()
-                .fixedSize()
-                .controlSize(.small)
-            }
-            MultiSwitchBox(selection: cost.$view, options: DashboardPrefs.CostView.allCases.map { ($0, language.costViewLabel($0)) }, segmentWidth: 74, height: 24)
-        }
+    private func openPeriod(_ date: Date) {
+        guard !isSettingsOpen, !justClosedSettings else { return }
+        ctx.onKPI(.costPeriod(date))
     }
 
     @ViewBuilder private func costBody<V: View>(height: CGFloat, @ViewBuilder _ loaded: (DashboardModel.Cost) -> V) -> some View {
         switch ctx.model.costState {
         case .loaded(let c): loaded(c)
         case .loading:
-            ProgressView().controlSize(.regular).frame(maxWidth: .infinity, minHeight: height)
+            Color.clear.frame(maxWidth: .infinity, minHeight: height)
         case .denied:
             DashboardEmptyChart(icon: "lock", message: language.dashCostHiddenHint)
         case .failed(let message):
@@ -325,6 +234,7 @@ struct DashboardServicesSection: View {
                                         .font(.caption)
                                         .foregroundStyle(.secondary)
                                         .lineLimit(1)
+                                        .dashboardLoadingBlur()
                                 }
                                 DashboardTileGrid(services: services, language: language, favorites: ctx.favorites, onOpen: ctx.onOpen)
                             }
@@ -336,6 +246,7 @@ struct DashboardServicesSection: View {
                 }
             }
         }
+        .dashboardLoading(ctx.isCounting, label: ctx.countingHint)
     }
 
     private func title(_ text: String, icon: String, tint: Color) -> some View {
@@ -347,34 +258,14 @@ struct DashboardServicesSection: View {
     }
 }
 
-// MARK: - Section switches
-
-/// The header's "Sections" popover: one switch per section, applied right
-/// away - turning one on shows it and fetches its data, turning it off
-/// hides it and stops its requests.
-struct DashboardSectionSwitches: View {
-    let prefs: DashboardPrefs
+/// The Install button beside a section switch whose packages are missing
+/// (the dashboard's Sections menu and Settings › Display › Dashboard).
+struct DashboardSectionInstallButton: View {
+    let service: String
     let language: AppLanguage
-    var onToggle: (DashboardPrefs.Widget, Bool) -> Void
-
-    @State private var isOpen = false
+    let action: () -> Void
 
     var body: some View {
-        SecondaryButton(systemImage: "switch.2", compactSize: 30, help: language.dashSections) { isOpen.toggle() }
-            .popover(isPresented: $isOpen, arrowEdge: .bottom) {
-                VStack(alignment: .leading, spacing: 10) {
-                    Text(language.dashSections).font(.headline)
-                    ForEach(DashboardPrefs.Widget.allCases, id: \.self) { widget in
-                        HStack {
-                            Text(language.dsWidget(widget))
-                            Spacer(minLength: 16)
-                            SwitchBox(isOn: Binding(get: { prefs.isOn(widget) }, set: { onToggle(widget, $0) }))
-                        }
-                    }
-                    Text(language.dashSectionsHint).font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
-                }
-                .padding(16)
-                .frame(width: 320)
-            }
+        DownloadButton(language.dashPackagesInstall, compactSize: 22, help: language.dashPackagesInstallHelp(service), action: action)
     }
 }

@@ -14,6 +14,7 @@ struct ScreenFilterField: View {
         TextField(prompt ?? appState.language.filterPrompt, text: $text)
             .textFieldStyle(.roundedBorder)
             .padding(.horizontal, 12)
+            .padding(.top, 10)
             .padding(.bottom, 6)
             .onAppear {
                 if let pending = appState.takePendingFilter() { text = pending }

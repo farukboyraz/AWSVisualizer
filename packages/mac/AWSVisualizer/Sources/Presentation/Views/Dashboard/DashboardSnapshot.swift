@@ -34,20 +34,32 @@ enum DashboardSnapshot {
         monthly.hideEmptyServices = true
         monthly.servicesLayout = .flat
         let monthlyModel = model.with(costState: .loaded(sampleMonthlyCost))
+        // Mixed section sizes (S / M / L).
+        var sized = DashboardPrefs.defaults
+        sized.layout = sized.layout
+            .resizing(.resourcesKpi, to: .large)
+            .resizing(.activeKpi, to: .medium)
+            .resizing(.distribution, to: .large)
+            .resizing(.topServices, to: .small)
+            .resizing(.costByService, to: .large)
         let variants: [(String, DashboardPrefs, DashboardModel, DashboardPrefs.CostView, NSAppearance.Name, AppLanguage, CGFloat)] = [
             ("muted-light-tr", withCards, model, .month, .aqua, .tr, 1400),
             ("muted-dark-en", .defaults, model, .month, .darkAqua, .en, 1400),
             ("vivid-light-en", vivid, model, .month, .aqua, .en, 1400),
             ("monthly-partial-dark-tr", monthly, monthlyModel, .monthly, .darkAqua, .tr, 1400),
             ("muted-light-tr-narrow", .defaults, model, .month, .aqua, .tr, 980),
+            ("sizes-light-tr", sized, monthlyModel, .monthly, .aqua, .tr, 1400),
+            ("loading-light-tr", sized, monthlyModel, .monthly, .aqua, .tr, 1400),
         ]
         for (name, prefs, model, view, appearance, language, width) in variants {
             NSAppearance.current = NSAppearance(named: appearance)
             let content = DashboardContent(
                 model: model, prefs: prefs, language: language,
                 profile: "sample-profile", region: "eu-west-1", account: "123456789012", favorites: ["lambda", "dynamodb", "s3", "cloudwatch"], width: width - 56,
-                costView: .constant(view), costMonth: .constant(DashboardContent.currentMonthKey), costMonths: .constant(6), chartStyle: .constant(view == .monthly ? .line : .bar),
-                cardStates: cardStates
+                costView: .constant(view), costMonth: .constant(DashboardContent.currentMonthKey), costMonths: .constant(6), chartStyle: .constant(view == .monthly ? .line : .bar), singleColor: .constant(name.hasPrefix("sizes")),
+                cardStates: cardStates,
+                // "loading": half the counts still on their way (the blurred text + loader).
+                loadingServices: name.hasPrefix("loading") ? Set(model.services.prefix(model.services.count / 2).map(\.id)) : []
             )
             .padding(28)
             .frame(width: width)
@@ -61,28 +73,32 @@ enum DashboardSnapshot {
                 print("wrote dashboard-\(name).png")
             }
         }
-        // The hover bubble and a Details sheet on their own (hover can't be rendered).
-        if let cost = model.cost, let point = cost.daily.dropFirst(5).first {
-            for (scheme, appearance) in [("light", NSAppearance.Name.aqua), ("dark", .darkAqua)] {
-                NSAppearance.current = NSAppearance(named: appearance)
-                let top = cost.services(on: point.date).prefix(3)
-                let bubble = DashboardTooltipView(
-                    data: DashboardTooltipData(
-                        title: DashboardFormat.periodLabel(point.date, monthly: false, language: .tr),
-                        subtitle: "\(DashboardFormat.money(point.amount, currency: "USD")) · \(DashboardFormat.signedPercent(point.amount, vs: cost.dailyAverage)) ort.'ya göre",
-                        rows: top.map { .init(label: DashboardFormat.shortServiceName($0.name), value: DashboardFormat.money($0.amount, currency: "USD")) },
-                        detail: .costPoint(date: point.date)
-                    ),
-                    language: .tr, onDetails: { _ in }
-                )
-                .padding(30)
+        // The spend panel's settings popover, on its own.
+        for (scheme, appearance) in [("light", NSAppearance.Name.aqua), ("dark", .darkAqua)] {
+            NSAppearance.current = NSAppearance(named: appearance)
+            let selection = DashboardCostSelection(view: .constant(.monthly), month: .constant(DashboardContent.currentMonthKey), months: .constant(6), chartStyle: .constant(.bar), singleColor: .constant(true))
+            let panel = DashboardCostSettingsPanel(cost: selection, language: .tr)
                 .background(Theme.detailBackground(appearance == .darkAqua ? .dark : .light))
                 .environment(\.colorScheme, appearance == .darkAqua ? .dark : .light)
-                write(bubble, name: "tooltip-\(scheme)", dir: dir)
-                let sheet = DashboardDetailSheet(detail: .costPoint(date: point.date), model: model, language: .tr, onOpen: { _ in }, onClose: {}, scrollable: false)
-                    .background(Color(nsColor: .windowBackgroundColor))
-                    .environment(\.colorScheme, appearance == .darkAqua ? .dark : .light)
-                write(sheet, name: "detail-\(scheme)", dir: dir)
+            write(panel, name: "cost-settings-\(scheme)", dir: dir)
+        }
+        // Donut with very thin slices (1 resource next to hundreds) at every
+        // size - such slices once crashed Swift Charts (rounded corners /
+        // insets wider than the slice).
+        do {
+            var categories = model.categories
+            if let donor = categories.first?.services.first {
+                for i in 0..<3 {
+                    categories.append(DashboardModel.Category(name: "Tiny \(i)", color: .gray, services: [DashboardModel.Service(entry: donor.entry, count: 1)]))
+                }
+            }
+            let total = categories.reduce(0) { $0 + $1.resources } * 4
+            for size in [CGFloat(140), 170, 230] {
+                let donut = DashboardCategoryDonut(categories: categories.map { c in
+                    c.name.hasPrefix("Tiny") ? c : DashboardModel.Category(name: c.name, color: c.color, services: c.services.map { DashboardModel.Service(entry: $0.entry, count: ($0.count ?? 0) * 4) })
+                }, total: total, language: .tr, size: size, legendLimit: 0)
+                .padding(10).frame(width: size + 40)
+                write(donut, name: "donut-thin-\(Int(size))", dir: dir)
             }
         }
         // The spend chart in each style, and its tooltip.
@@ -96,6 +112,14 @@ enum DashboardSnapshot {
                         .background(Theme.detailBackground(appearance == .darkAqua ? .dark : .light))
                         .environment(\.colorScheme, appearance == .darkAqua ? .dark : .light)
                     write(chart, name: "chart-\(style.rawValue)-\(scheme)", dir: dir)
+                    let single = DashboardCostChart(cost: cost, style: style, language: .tr, pinned: style == .bar ? cost.daily[cost.daily.count / 2].date : nil, singleColor: true)
+                        .frame(width: 860, height: 300)
+                        .padding(.horizontal, 20)
+                        .padding(.top, style == .bar ? 200 : 20)
+                        .padding(.bottom, 20)
+                        .background(Theme.detailBackground(appearance == .darkAqua ? .dark : .light))
+                        .environment(\.colorScheme, appearance == .darkAqua ? .dark : .light)
+                    write(single, name: "chart-single-\(style.rawValue)-\(scheme)", dir: dir)
                 }
                 // Tooltip in place: a period in the middle and one at each edge.
                 for (name, index) in [("mid", cost.daily.count / 2), ("left", 0), ("right", cost.daily.count - 1)] {

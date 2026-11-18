@@ -6,7 +6,9 @@ import SwiftUI
 struct DevToolsSettings: View {
     @Binding var config: DevToolsConfig
 
-    @State private var installed: Set<String>?
+    /// Program -> full path of the installed ones (nil until the first check).
+    @State private var installed: [String: String]?
+    @State private var isChecking = false
     @State private var newName = ""
     @State private var newCommand = ""
     @State private var newIcon = "terminal"
@@ -40,9 +42,22 @@ struct DevToolsSettings: View {
                 }
             }
 
+            HStack(spacing: 8) {
+                RefreshButton("Check again", isLoading: isChecking, isDisabled: isChecking) {
+                    Task { await check(fresh: true) }
+                }
+                Text("Looks in your shell's PATH (including ~/.zshrc / ~/.bashrc) and the usual install folders. Also re-checked when you come back to the app.")
+                    .font(.caption)
+                    .foregroundStyle(.tertiary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+
             addCustomForm
         }
         .task { await check() }
+        .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
+            Task { await check() }
+        }
     }
 
     private func row(_ tool: DevTool) -> some View {
@@ -89,17 +104,21 @@ struct DevToolsSettings: View {
 
     @ViewBuilder
     private func status(_ tool: DevTool) -> some View {
-        if let binary = tool.binary, let installed {
-            if installed.contains(binary) {
-                Label("Installed", systemImage: "checkmark.circle.fill")
-                    .labelStyle(.iconOnly)
-                    .foregroundStyle(.green)
-                    .help("\(binary) found")
+        if tool.command != nil, let installed {
+            let names = tool.binaries.joined(separator: " / ")
+            if let (command, path) = DevToolLocator.resolve(tool, in: installed) {
+                HStack(spacing: 4) {
+                    Image(systemName: "checkmark.circle.fill").foregroundStyle(.green)
+                    if command != tool.command, let program = DevTool.program(of: command) {
+                        Text("via \(program)").font(.caption2).foregroundStyle(.secondary)
+                    }
+                }
+                .help("Found: \(path)")
             } else if let url = tool.installURL {
                 Button("Install") { NSWorkspace.shared.open(url) }
                     .buttonStyle(.link)
                     .font(.caption)
-                    .help("\(binary) wasn't found - open the install page")
+                    .help("\(names) wasn't found - open the install page")
             } else {
                 Text("not found").font(.caption2).foregroundStyle(.orange)
             }
@@ -150,7 +169,9 @@ struct DevToolsSettings: View {
         Task { await check() }
     }
 
-    private func check() async {
-        installed = await DevToolLocator.installed(allTools.compactMap(\.binary))
+    private func check(fresh: Bool = false) async {
+        isChecking = true
+        installed = await DevToolLocator.locate(allTools.flatMap(\.binaries), fresh: fresh)
+        isChecking = false
     }
 }

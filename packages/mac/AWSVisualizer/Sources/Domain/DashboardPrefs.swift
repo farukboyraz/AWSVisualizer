@@ -24,6 +24,8 @@ struct DashboardPrefs: Codable, Equatable {
         var months: Int = 6
         var showEstimate: Bool = true
         var chartStyle: ChartStyle = .bar
+        /// The spend chart in one color (the total only) instead of a color per service.
+        var singleColor = false
 
         init() {}
 
@@ -34,6 +36,7 @@ struct DashboardPrefs: Codable, Equatable {
             self.months = DashboardPrefs.monthRanges.contains(months) ? months : 6
             showEstimate = (try? c.decodeIfPresent(Bool.self, forKey: .showEstimate)) ?? true
             chartStyle = (try? c.decodeIfPresent(ChartStyle.self, forKey: .chartStyle)) ?? .bar
+            singleColor = (try? c.decodeIfPresent(Bool.self, forKey: .singleColor)) ?? false
         }
     }
 
@@ -49,6 +52,8 @@ struct DashboardPrefs: Codable, Equatable {
     var refreshOnOpen = false
     /// The user's own cards, in display order.
     var cards: [DashboardCard] = []
+    /// Sections as rows and their sizes (the layout editor).
+    var layout: DashboardLayout = .default
 
     static let defaults = DashboardPrefs()
     static let monthRanges = [3, 6, 12]
@@ -72,6 +77,29 @@ struct DashboardPrefs: Codable, Equatable {
         refreshMinutes = (0...Self.refreshMax).contains(minutes) ? minutes : 15
         refreshOnOpen = (try? c.decodeIfPresent(Bool.self, forKey: .refreshOnOpen)) ?? false
         cards = (try? c.decodeIfPresent([DashboardCard].self, forKey: .cards)) ?? []
+        let rows = (try? c.decodeIfPresent([[String]].self, forKey: .layout)) ?? DashboardLayout.defaultRows.map { $0.map(\.rawValue) }
+        let sizes = (try? c.decodeIfPresent([String: String].self, forKey: .sizes)) ?? [:]
+        layout = DashboardLayout(reading: rows, sizes: sizes)
+    }
+
+    /// The layout's rows and sizes are stored as two keys (`layout`, `sizes`).
+    private enum CodingKeys: String, CodingKey {
+        case widgets, excludedServices, cost, colorStyle, hideEmptyServices, servicesLayout, refreshMinutes, refreshOnOpen, cards, layout, sizes
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var c = encoder.container(keyedBy: CodingKeys.self)
+        try c.encode(widgets, forKey: .widgets)
+        try c.encode(excludedServices, forKey: .excludedServices)
+        try c.encode(cost, forKey: .cost)
+        try c.encode(colorStyle, forKey: .colorStyle)
+        try c.encode(hideEmptyServices, forKey: .hideEmptyServices)
+        try c.encode(servicesLayout, forKey: .servicesLayout)
+        try c.encode(refreshMinutes, forKey: .refreshMinutes)
+        try c.encode(refreshOnOpen, forKey: .refreshOnOpen)
+        try c.encode(cards, forKey: .cards)
+        try c.encode(layout.rowsJSON, forKey: .layout)
+        try c.encode(layout.sizesJSON, forKey: .sizes)
     }
 
     func isOn(_ widget: Widget) -> Bool { widgets[widget.rawValue] ?? true }
@@ -95,13 +123,15 @@ struct DashboardPrefs: Codable, Equatable {
         return [
             "widgets": n.widgets,
             "excludedServices": n.excludedServices,
-            "cost": ["view": n.cost.view.rawValue, "months": n.cost.months, "showEstimate": n.cost.showEstimate, "chartStyle": n.cost.chartStyle.rawValue],
+            "cost": ["view": n.cost.view.rawValue, "months": n.cost.months, "showEstimate": n.cost.showEstimate, "chartStyle": n.cost.chartStyle.rawValue, "singleColor": n.cost.singleColor],
             "colorStyle": n.colorStyle.rawValue,
             "hideEmptyServices": n.hideEmptyServices,
             "servicesLayout": n.servicesLayout.rawValue,
             "refreshMinutes": n.refreshMinutes,
             "refreshOnOpen": n.refreshOnOpen,
             "cards": n.cards.map(\.asJSON),
+            "layout": n.layout.rowsJSON,
+            "sizes": n.layout.sizesJSON,
         ]
     }
 }
@@ -198,4 +228,38 @@ enum DashboardCacheKey {
     }
     static func card(_ id: String, profile: String, region: String) -> String { "card|\(id)|\(profile)|\(region)" }
     static func run(_ id: String, profile: String, region: String) -> String { "run|\(id)|\(profile)|\(region)" }
+}
+
+// MARK: - Sections that need extra packages
+
+extension DashboardPrefs {
+    /// The catalog service whose SDK packages a section needs on top of the
+    /// selected services' own: Cost Explorer for the cost sections.
+    static func requiredService(for widget: Widget) -> String? {
+        widget.usesCost ? "costexplorer" : nil
+    }
+
+    /// Every service any section can need.
+    static var requiredServices: Set<String> {
+        Set(Widget.allCases.compactMap(requiredService(for:)))
+    }
+
+    /// What the dashboard draws and fetches: a section whose packages are
+    /// missing counts as off. The saved setting itself is left alone, so
+    /// the section comes back on its own once the packages are installed.
+    func available(missing: Set<String>) -> DashboardPrefs {
+        guard !missing.isEmpty else { return self }
+        var copy = self
+        for widget in Widget.allCases {
+            if let service = Self.requiredService(for: widget), missing.contains(service) { copy.set(widget, false) }
+        }
+        return copy
+    }
+
+    /// Sections switched on whose packages are missing.
+    func sectionsWaiting(missing: Set<String>) -> [Widget] {
+        Widget.allCases.filter { widget in
+            isOn(widget) && Self.requiredService(for: widget).map(missing.contains) == true
+        }
+    }
 }

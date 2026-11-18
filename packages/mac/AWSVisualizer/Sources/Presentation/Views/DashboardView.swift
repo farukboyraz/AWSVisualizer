@@ -37,6 +37,7 @@ struct DashboardView: View {
     @State private var costMonth = DashboardContent.currentMonthKey
     @State private var costMonths = 6
     @State private var chartStyle: DashboardPrefs.ChartStyle = .bar
+    @State private var singleColor = false
 
     @State private var editing: EditingCard?
 
@@ -46,7 +47,27 @@ struct DashboardView: View {
         let isNew: Bool
     }
 
-    private var prefs: DashboardPrefs { appState.dashboardPrefs }
+    /// The saved settings - what changes are made to and saved from.
+    private var savedPrefs: DashboardPrefs { appState.dashboardPrefs }
+    /// What is drawn and fetched: sections whose packages are missing count as off.
+    private var prefs: DashboardPrefs { savedPrefs.available(missing: appState.missingDashboardServices) }
+
+    @State private var packagePrompt: PackagePrompt?
+    @State private var installing: PackageInstallRequest?
+
+    /// Sections switched on whose packages are missing, asked about once.
+    private struct PackagePrompt: Identifiable {
+        let id = UUID()
+        let services: [String]
+        let sections: [DashboardPrefs.Widget]
+    }
+
+    private struct PackageInstallRequest: Identifiable {
+        let id = UUID()
+        let services: [String]
+        /// Sections switched on once the install finishes.
+        let enable: [DashboardPrefs.Widget]
+    }
     private var profile: String { appState.currentProfile }
     private var region: String { appState.currentRegion }
 
@@ -128,7 +149,57 @@ struct DashboardView: View {
             .alert(cardError ?? "", isPresented: Binding(get: { cardError != nil }, set: { if !$0 { cardError = nil } })) {
                 Button(appState.language.okButtonTitle) {}
             }
+            .task { askForMissingPackages() }
+            .onChange(of: appState.serviceCatalog.map(\.id)) { askForMissingPackages() }
+            .alert(
+                appState.language.dashPackagesTitle,
+                isPresented: Binding(get: { packagePrompt != nil }, set: { if !$0 { packagePrompt = nil } }),
+                presenting: packagePrompt
+            ) { prompt in
+                Button(appState.language.confirmYes) {
+                    installing = PackageInstallRequest(services: prompt.services, enable: [])
+                }
+                .keyboardShortcut(.defaultAction)
+                Button(appState.language.confirmNo, role: .cancel) {
+                    Task { await setSections(prompt.sections, on: false) }
+                }
+            } message: { prompt in
+                Text(appState.language.dashPackagesMessage(
+                    services: prompt.services.map(appState.serviceName),
+                    sections: prompt.sections.map(appState.language.dsWidget)
+                ))
+            }
+            .sheet(item: $installing) { request in
+                PackageInstallSheet(
+                    services: request.services,
+                    onFinished: {
+                        // Catalog reloaded by the sheet: the sections show up and fetch.
+                        if !request.enable.isEmpty { Task { await setSections(request.enable, on: true) } }
+                    },
+                    onClose: { installing = nil }
+                )
+            }
         }
+    }
+
+    /// Once per launch: sections switched on whose packages are missing ->
+    /// Yes installs them, No switches those sections off (saved, so it
+    /// isn't asked again). Nothing is asked when everything is installed.
+    private func askForMissingPackages() {
+        guard !appState.dashboardPackagePromptShown, !appState.serviceCatalog.isEmpty else { return }
+        let missing = appState.missingDashboardServices
+        let waiting = savedPrefs.sectionsWaiting(missing: missing)
+        guard !waiting.isEmpty else { return }
+        appState.dashboardPackagePromptShown = true
+        let services = Set(waiting.compactMap(DashboardPrefs.requiredService(for:))).filter(missing.contains).sorted()
+        packagePrompt = PackagePrompt(services: services, sections: waiting)
+    }
+
+    /// The Install button next to a section's switch.
+    private func install(for widget: DashboardPrefs.Widget) {
+        guard let service = DashboardPrefs.requiredService(for: widget) else { return }
+        let enable = DashboardPrefs.Widget.allCases.filter { DashboardPrefs.requiredService(for: $0) == service }
+        installing = PackageInstallRequest(services: [service], enable: widget.usesCost ? enable : [widget])
     }
 
     @ViewBuilder private func content(width: CGFloat) -> some View {
@@ -157,6 +228,7 @@ struct DashboardView: View {
                 costMonth: $costMonth,
                 costMonths: $costMonths,
                 chartStyle: $chartStyle,
+                singleColor: $singleColor,
                 visibleCards: visibleCards,
                 cardStates: cardStates,
                 runResults: runResults,
@@ -166,7 +238,12 @@ struct DashboardView: View {
                 onRefresh: { Task { await refreshAll() } },
                 onCustomize: { appState.requestedSettingsPage = .dashboard },
                 loadingServices: waiting,
-                onToggleSection: { widget, on in Task { await toggleSection(widget, on) } }
+                onToggleSection: { widget, on in Task { await toggleSection(widget, on) } },
+                missingPackages: appState.missingDashboardServices,
+                packageName: appState.serviceName,
+                onInstallSection: { install(for: $0) },
+                onInstallServices: { installing = PackageInstallRequest(services: $0, enable: []) },
+                onLayoutChange: { layout in Task { await saveLayout(layout) } }
             )
         }
     }
@@ -180,6 +257,7 @@ struct DashboardView: View {
         costView = prefs.cost.view
         costMonths = prefs.cost.months
         chartStyle = prefs.cost.chartStyle
+        singleColor = prefs.cost.singleColor
     }
 
     // MARK: - Loading
@@ -323,8 +401,27 @@ struct DashboardView: View {
     /// A section switched on / off in the header: saved right away; turning
     /// one on makes the dashboard fetch what it needs (the load task re-runs).
     private func toggleSection(_ widget: DashboardPrefs.Widget, _ on: Bool) async {
-        var updated = prefs
-        updated.set(widget, on)
+        await setSections([widget], on: on)
+    }
+
+    /// A drop in the layout editor: shown at once, saved to ~/.awsvisualizer.
+    private func saveLayout(_ layout: DashboardLayout) async {
+        var updated = savedPrefs
+        updated.layout = layout
+        let previous = appState.dashboardPrefs
+        appState.dashboardPrefs = updated
+        do {
+            let saved = try await api.updateDashboardPrefs(updated)
+            if let prefs = saved.dashboard { appState.dashboardPrefs = prefs }
+        } catch {
+            appState.dashboardPrefs = previous
+            cardError = error.friendlyMessage
+        }
+    }
+
+    private func setSections(_ widgets: [DashboardPrefs.Widget], on: Bool) async {
+        var updated = savedPrefs
+        for widget in widgets { updated.set(widget, on) }
         let previous = appState.dashboardPrefs
         appState.dashboardPrefs = updated.normalized
         do {
@@ -418,7 +515,7 @@ struct DashboardView: View {
     /// Cards are saved right away (not via the Settings draft): order,
     /// additions and deletions go to ~/.awsvisualizer immediately.
     private func updateCards(_ change: (inout [DashboardCard]) -> Void) async {
-        var updated = prefs
+        var updated = savedPrefs
         change(&updated.cards)
         let previous = appState.dashboardPrefs
         appState.dashboardPrefs = updated

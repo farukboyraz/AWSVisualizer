@@ -13,6 +13,7 @@ export const APP_VERSION: string = (() => {
   }
 })();
 import { join } from 'path';
+import { DEFAULT_LAYOUT, DEFAULT_SIZES, readLayout, readSizes, type WidgetSize } from './dashboard-layout.js';
 import { homedir } from 'os';
 
 export const DYNAMODB_ITEM_VIEWS = ['json', 'dynamodb-json', 'form'] as const;
@@ -127,6 +128,8 @@ export interface DashboardPrefs {
     months: (typeof COST_MONTH_RANGES)[number];
     showEstimate: boolean;
     chartStyle: (typeof COST_CHART_STYLES)[number];
+    /** The spend chart in one color (the total only) instead of a color per service. */
+    singleColor: boolean;
   };
   colorStyle: (typeof DASHBOARD_COLOR_STYLES)[number];
   hideEmptyServices: boolean;
@@ -137,18 +140,24 @@ export interface DashboardPrefs {
   refreshOnOpen: boolean;
   /** The user's own cards, in display order (drag and drop). */
   cards: DashboardCard[];
+  /** Sections as rows, top to bottom (the layout editor; see dashboard-layout.ts). */
+  layout: string[][];
+  /** Each section's size: small / medium / large (see dashboard-layout.ts). */
+  sizes: Record<string, WidgetSize>;
 }
 
 export const DEFAULT_DASHBOARD: DashboardPrefs = {
   widgets: Object.fromEntries(DASHBOARD_WIDGETS.map((w) => [w, true])) as Record<DashboardWidget, boolean>,
   excludedServices: [],
-  cost: { view: 'month', months: 6, showEstimate: true, chartStyle: 'bar' },
+  cost: { view: 'month', months: 6, showEstimate: true, chartStyle: 'bar', singleColor: false },
   colorStyle: 'muted',
   hideEmptyServices: false,
   servicesLayout: 'categories',
   refreshMinutes: 15,
   refreshOnOpen: false,
   cards: [],
+  layout: DEFAULT_LAYOUT.map((row) => [...row]),
+  sizes: { ...DEFAULT_SIZES },
 };
 
 /** Unknown keys / wrong types fall back to the defaults field by field. */
@@ -159,6 +168,7 @@ export function readDashboardPrefs(raw: any): DashboardPrefs {
   // Older files had autoRefreshMinutes (0 / 5 / 15 / 30).
   const minutes = typeof raw?.refreshMinutes === 'number' ? raw.refreshMinutes : typeof raw?.autoRefreshMinutes === 'number' && raw.autoRefreshMinutes > 0 ? raw.autoRefreshMinutes : d.refreshMinutes;
   const seen = new Set<string>();
+  const sizes = readSizes(raw?.sizes);
   return {
     widgets,
     excludedServices: Array.isArray(raw?.excludedServices) ? raw.excludedServices.filter((x: unknown) => typeof x === 'string') : [],
@@ -167,6 +177,7 @@ export function readDashboardPrefs(raw: any): DashboardPrefs {
       months: COST_MONTH_RANGES.includes(raw?.cost?.months) ? raw.cost.months : d.cost.months,
       showEstimate: typeof raw?.cost?.showEstimate === 'boolean' ? raw.cost.showEstimate : d.cost.showEstimate,
       chartStyle: COST_CHART_STYLES.includes(raw?.cost?.chartStyle) ? raw.cost.chartStyle : d.cost.chartStyle,
+      singleColor: typeof raw?.cost?.singleColor === 'boolean' ? raw.cost.singleColor : d.cost.singleColor,
     },
     colorStyle: DASHBOARD_COLOR_STYLES.includes(raw?.colorStyle) ? raw.colorStyle : d.colorStyle,
     hideEmptyServices: typeof raw?.hideEmptyServices === 'boolean' ? raw.hideEmptyServices : d.hideEmptyServices,
@@ -177,6 +188,8 @@ export function readDashboardPrefs(raw: any): DashboardPrefs {
       .map(readDashboardCard)
       .filter((c: DashboardCard | null): c is DashboardCard => !!c && !seen.has(c.id) && !!seen.add(c.id))
       .slice(0, MAX_CARDS),
+    layout: readLayout(raw?.layout, sizes),
+    sizes,
   };
 }
 
@@ -237,6 +250,8 @@ export interface AppConfig {
   dashboard: DashboardPrefs;
   /** Last dashboard data per profile / region / view / card, so opening the dashboard needs no AWS call. */
   dashboardCache: Record<string, DashboardCacheEntry>;
+  /** Per profile: when its sign-in runs out and what the last check said (see sts.ts `checkAllProfiles`). */
+  profileSessions: Record<string, ProfileSession>;
   /** Background color (as `#RRGGBB`) for each semantic `AppButton` kind on
    * the Swift side - text/icon color is never stored, always derived from
    * the background for contrast. */
@@ -371,6 +386,7 @@ const DEFAULT_CONFIG: AppConfig = {
   historyLayout: 'singlePage',
   dashboard: DEFAULT_DASHBOARD,
   dashboardCache: {},
+  profileSessions: {},
   buttonColors: DEFAULT_BUTTON_COLORS,
   defaultIdeBundleIdentifier: '',
   userDefaultServices: [],
@@ -519,6 +535,7 @@ export function loadConfig(): AppConfig {
       historyLayout: HISTORY_LAYOUTS.includes(codeCommitDisplay.historyLayout) ? codeCommitDisplay.historyLayout : DEFAULT_CONFIG.historyLayout,
       dashboard: readDashboardPrefs(parsed.display?.dashboard),
       dashboardCache: parsed.dashboardCache && typeof parsed.dashboardCache === 'object' && !Array.isArray(parsed.dashboardCache) ? parsed.dashboardCache : {},
+      profileSessions: readProfileSessions(parsed.profileSessions),
       buttonColors: { ...DEFAULT_BUTTON_COLORS, ...parsed.buttonColors },
       defaultIdeBundleIdentifier: typeof parsed.defaultIdeBundleIdentifier === 'string' ? parsed.defaultIdeBundleIdentifier : DEFAULT_CONFIG.defaultIdeBundleIdentifier,
       userDefaultServices: Array.isArray(parsed.userDefaultServices) ? parsed.userDefaultServices.filter((x: unknown) => typeof x === 'string') : [],
@@ -552,6 +569,48 @@ export function saveDashboardCache(key: string, data: unknown): DashboardCacheEn
   writeConfig(config);
   cachedConfig = config;
   return entry;
+}
+
+// ---- Profile sign-in state (`profileSessions` in ~/.awsvisualizer)
+
+/** What the last profile check found for one profile. */
+export interface ProfileSession {
+  /** When its SSO sign-in (or exported credentials) run out; ISO time. */
+  expiresAt?: string;
+  /** When it was last checked; ISO time. */
+  checkedAt: string;
+  /** Whether AWS accepted it then. */
+  valid: boolean;
+  /** Why it failed, when it did. */
+  error?: string;
+}
+
+function readProfileSessions(raw: unknown): Record<string, ProfileSession> {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return {};
+  const out: Record<string, ProfileSession> = {};
+  for (const [name, value] of Object.entries(raw as Record<string, any>)) {
+    if (!value || typeof value !== 'object' || typeof value.checkedAt !== 'string' || typeof value.valid !== 'boolean') continue;
+    out[name] = {
+      checkedAt: value.checkedAt,
+      valid: value.valid,
+      ...(typeof value.expiresAt === 'string' ? { expiresAt: value.expiresAt } : {}),
+      ...(typeof value.error === 'string' ? { error: value.error.slice(0, 500) } : {}),
+    };
+  }
+  return out;
+}
+
+export function getProfileSessions(): Record<string, ProfileSession> {
+  return loadConfig().profileSessions;
+}
+
+/** Replaces the saved state with the latest check (profiles no longer in ~/.aws/config drop out). */
+export function saveProfileSessions(sessions: Record<string, ProfileSession>): void {
+  const config = loadConfig();
+  if (JSON.stringify(config.profileSessions) === JSON.stringify(sessions)) return;
+  config.profileSessions = sessions;
+  writeConfig(config);
+  cachedConfig = config;
 }
 
 export function saveDashboardPrefs(prefs: DashboardPrefs): void {

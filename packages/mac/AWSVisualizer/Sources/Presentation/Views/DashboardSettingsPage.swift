@@ -10,6 +10,15 @@ struct DashboardSettingsPage: View {
     @State private var customMode = false
     @State private var customValue = "180"
     @State private var customHours = false
+    @State private var installing: InstallRequest?
+
+    /// Install from the Sections list; the section is switched on in the
+    /// draft when it finishes (saved with Save Changes).
+    private struct InstallRequest: Identifiable {
+        let id = UUID()
+        let service: String
+        let widgets: [DashboardPrefs.Widget]
+    }
 
     private var language: AppLanguage { appState.language }
     private var services: [AWSServiceCatalogEntry] { appState.selectedCatalogEntries.filter(\.implemented) }
@@ -45,10 +54,26 @@ struct DashboardSettingsPage: View {
                         .padding(.vertical, 2)
                         .background(Color.primary.opacity(0.06), in: Capsule())
                     Spacer()
-                    SwitchBox(isOn: Binding(get: { prefs.isOn(widget) }, set: { prefs.set(widget, $0) }))
+                    if let service = DashboardPrefs.requiredService(for: widget), appState.missingDashboardServices.contains(service) {
+                        DashboardSectionInstallButton(service: appState.serviceName(service), language: language) {
+                            let widgets = DashboardPrefs.Widget.allCases.filter { DashboardPrefs.requiredService(for: $0) == service }
+                            installing = InstallRequest(service: service, widgets: widgets)
+                        }
+                        SwitchBox(isOn: .constant(false)).disabled(true).opacity(0.5)
+                            .help(language.dashPackagesMissing(appState.serviceName(service)))
+                    } else {
+                        SwitchBox(isOn: Binding(get: { prefs.isOn(widget) }, set: { prefs.set(widget, $0) }))
+                    }
                 }
             }
             note(language.dsSectionsNote)
+        }
+        .sheet(item: $installing) { request in
+            PackageInstallSheet(
+                services: [request.service],
+                onFinished: { for widget in request.widgets { prefs.set(widget, true) } },
+                onClose: { installing = nil }
+            )
         }
     }
 
@@ -73,6 +98,7 @@ struct DashboardSettingsPage: View {
                     Spacer()
                     MultiSwitchBox(selection: $prefs.cost.chartStyle, options: DashboardPrefs.ChartStyle.allCases.map { ($0, language.chartStyleLabel($0)) }, segmentWidth: 76)
                 }
+                LabeledSwitchBox(title: language.dsSingleColor, isOn: $prefs.cost.singleColor)
                 LabeledSwitchBox(title: language.dsShowEstimate, isOn: $prefs.cost.showEstimate)
                 note(language.dsCostViewNote)
             }

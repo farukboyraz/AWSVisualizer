@@ -155,6 +155,11 @@ final class APIService: APIServiceProtocol {
         ])
     }
 
+    /// Removes the profile from ~/.aws/config (and ~/.aws/credentials).
+    func deleteProfile(name: String) async throws {
+        try await postRaw("/api/profiles/delete", body: ["name": name])
+    }
+
     // MARK: - Service Catalog
 
     func getServiceCatalog() async throws -> [AWSServiceCatalogEntry] {

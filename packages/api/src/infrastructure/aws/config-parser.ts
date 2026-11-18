@@ -1,4 +1,4 @@
-import { readFileSync, writeFileSync, mkdirSync, chmodSync } from 'fs';
+import { readFileSync, writeFileSync, mkdirSync, chmodSync, copyFileSync, existsSync } from 'fs';
 import { join, dirname } from 'path';
 import { homedir } from 'os';
 import type { AwsProfile, SsoSession } from '../../domain/entities/index.js';
@@ -318,4 +318,45 @@ export function ensureSsoSession(startUrl: string, region: string, preferredName
   const separator = content.length > 0 && !content.endsWith('\n') ? '\n\n' : content.length > 0 ? '\n' : '';
   writeFileSync(configPath, content + separator + block, 'utf-8');
   return { name, region, created: true };
+}
+
+/** Lines of an INI file without the `[header]` section (up to the next section). */
+function withoutSection(content: string, header: string): { text: string; removed: boolean } {
+  const lines = content.replace(/\r\n/g, '\n').split('\n');
+  const start = lines.findIndex((l) => l.trim() === header);
+  if (start === -1) return { text: content, removed: false };
+  let end = lines.findIndex((l, i) => i > start && /^\[.+\]$/.test(l.trim()));
+  if (end === -1) end = lines.length;
+  // Comments / blank lines right before the next section belong to it.
+  while (end - 1 > start && (lines[end - 1].trim() === '' || /^[#;]/.test(lines[end - 1].trim())) && end < lines.length) end--;
+  lines.splice(start, end - start);
+  return { text: lines.join('\n').replace(/\n{3,}/g, '\n\n').replace(/^\n+/, ''), removed: true };
+}
+
+/**
+ * Deletes a profile: its `[profile <name>]` (or `[default]`) section in
+ * ~/.aws/config and its `[<name>]` keys in ~/.aws/credentials. The
+ * sso-session it used stays (other profiles may share it). Each file is
+ * copied to `<file>.awsvisualizer.bak` first.
+ */
+export function removeProfile(name: string): void {
+  if (!parseAwsConfig().profiles.some((p) => p.name === name)) {
+    throw Object.assign(new Error(`There is no profile named "${name}"`), { status: 404 });
+  }
+  const targets: [string, string][] = [
+    [getAwsConfigPath(), name === 'default' ? '[default]' : `[profile ${name}]`],
+    [getAwsCredentialsPath(), `[${name}]`],
+  ];
+  for (const [path, header] of targets) {
+    if (!existsSync(path)) continue;
+    const content = readFileSync(path, 'utf-8');
+    const { text, removed } = withoutSection(content, header);
+    if (!removed) continue;
+    copyFileSync(path, `${path}.awsvisualizer.bak`);
+    writeFileSync(path, text, 'utf-8');
+    if (path === getAwsCredentialsPath()) {
+      chmodSync(path, 0o600);
+      chmodSync(`${path}.awsvisualizer.bak`, 0o600);
+    }
+  }
 }

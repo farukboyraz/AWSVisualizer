@@ -14,9 +14,11 @@ extension AppState {
     /// Re-runs `check-profiles`. Automatic callers pass `force: false` and
     /// are debounced, so focus changes or a burst of failing requests don't
     /// each fire a round of STS calls.
+    /// `minimumInterval`: even a forced re-check waits this long after the
+    /// last one (sign-in file changes come in bursts).
     @MainActor
-    func refreshProfiles(using api: APIService, force: Bool = false) async {
-        if !force, let last = lastProfileRefresh, Date().timeIntervalSince(last) < 30 {
+    func refreshProfiles(using api: APIService, force: Bool = false, minimumInterval: TimeInterval = 0) async {
+        if let last = lastProfileRefresh, Date().timeIntervalSince(last) < (force ? minimumInterval : 30) {
             return
         }
         lastProfileRefresh = Date()
@@ -31,5 +33,16 @@ extension AppState {
     func logIn(profile: AWSProfile, using api: APIService) async throws {
         _ = try await api.login(profile: profile.name)
         await refreshProfiles(using: api, force: true)
+    }
+
+    /// Removes the profile from ~/.aws/config (asked for confirmation
+    /// before); when it was the one in use, another signed-in profile is picked.
+    @MainActor
+    func deleteProfile(_ profile: AWSProfile, using api: APIService) async throws {
+        try await api.deleteProfile(name: profile.name)
+        await refreshProfiles(using: api, force: true)
+        if currentProfile == profile.name, let next = profiles.first(where: \.isValid) ?? profiles.first {
+            currentProfile = next.name
+        }
     }
 }

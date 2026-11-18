@@ -11,6 +11,8 @@ import AppKit
 struct PTYTerminalView: NSViewRepresentable {
     let executablePath: String
     let arguments: [String]
+    /// nil = SwiftTerm's defaults.
+    var environment: [String]? = nil
     let currentDirectory: String
     var onProcessTerminated: (Int32?) -> Void
 
@@ -21,7 +23,7 @@ struct PTYTerminalView: NSViewRepresentable {
     func makeNSView(context: Context) -> LocalProcessTerminalView {
         let view = LocalProcessTerminalView(frame: .zero)
         view.processDelegate = context.coordinator
-        view.startProcess(executable: executablePath, args: arguments, currentDirectory: currentDirectory)
+        view.startProcess(executable: executablePath, args: arguments, environment: environment, currentDirectory: currentDirectory)
         return view
     }
 
@@ -101,6 +103,14 @@ private struct DevToolsTabItem: Identifiable {
     var ptySessionID = UUID()
     var ended = false
     var exitCode: Int32?
+    /// How the session was started - fixed once it runs, so a later
+    /// install check never swaps a live terminal for a placeholder.
+    var launch: DevToolsLaunch?
+}
+
+private struct DevToolsLaunch {
+    let arguments: [String]
+    let environment: [String]
 }
 
 /// The collapsible right-edge panel. Every enabled tool (Settings ›
@@ -123,7 +133,8 @@ struct DevToolsPanelView: View {
     @State private var tabs: [DevToolsTabItem]
     @State private var activeTabID: UUID?
     @State private var counters: [String: Int] = [:]
-    @State private var installed: Set<String>?
+    /// Program -> full path of the installed ones (nil until the first check).
+    @State private var installed: [String: String]?
     @State private var renamingTabID: UUID?
     @State private var renameText = ""
 
@@ -169,8 +180,14 @@ struct DevToolsPanelView: View {
         .frame(width: isCollapsed ? collapsedWidth : expandedWidth, alignment: .leading)
         .clipped()
         .background(Theme.sidebarPanelBackground(colorScheme))
-        .task {
-            installed = await DevToolLocator.installed(tools.compactMap(\.binary))
+        // Enabling a tool in Settings changes `tools`; coming back to the
+        // app may mean something was just installed - check again both times.
+        .task(id: tools.map(\.id)) {
+            syncTabs()
+            await checkInstalled()
+        }
+        .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
+            Task { await checkInstalled() }
         }
         .alert("Rename Session", isPresented: Binding(
             get: { renamingTabID != nil },
@@ -188,8 +205,45 @@ struct DevToolsPanelView: View {
     }
 
     private func isInstalled(_ tool: DevTool) -> Bool? {
-        guard let binary = tool.binary else { return true }
-        return installed.map { $0.contains(binary) }
+        guard tool.command != nil else { return true }
+        return installed.map { DevToolLocator.resolve(tool, in: $0) != nil }
+    }
+
+    /// Keeps the old result on screen while checking (no flicker).
+    private func checkInstalled(fresh: Bool = false) async {
+        let found = await DevToolLocator.locate(tools.flatMap(\.binaries), fresh: fresh)
+        guard !Task.isCancelled else { return }
+        installed = found
+        fillLaunches()
+    }
+
+    private func makeLaunch(_ tool: DevTool) -> DevToolsLaunch? {
+        guard isInstalled(tool) == true else { return nil }
+        let found = installed ?? [:]
+        let base = Terminal.getEnvironmentVariables(termName: "xterm-256color")
+        return DevToolsLaunch(
+            arguments: DevToolLocator.launchArguments(for: tool, in: found),
+            environment: DevToolLocator.launchEnvironment(for: tool, in: found, base: base)
+        )
+    }
+
+    /// Tabs that were waiting for the check (or for an install) start now.
+    private func fillLaunches() {
+        for index in tabs.indices where tabs[index].launch == nil {
+            tabs[index].launch = makeLaunch(tabs[index].tool)
+        }
+    }
+
+    /// Settings changed the tool list: close tabs of tools that were turned
+    /// off, keep every other session running.
+    private func syncTabs() {
+        let ids = Set(tools.map(\.id))
+        tabs.removeAll { !ids.contains($0.tool.id) }
+        if let activeTabID, !tabs.contains(where: { $0.id == activeTabID }) {
+            self.activeTabID = tabs.last?.id
+        }
+        if tabs.isEmpty, let first = tools.first { open(first) }
+        fillLaunches() // the plain terminal needs no install check
     }
 
     private var header: some View {
@@ -337,7 +391,8 @@ struct DevToolsPanelView: View {
         guard tabs.count < maxTabs else { return }
         let number = (counters[tool.id] ?? 0) + 1
         counters[tool.id] = number
-        let tab = DevToolsTabItem(id: UUID(), tool: tool, title: number == 1 ? tool.name : "\(tool.name) \(number)")
+        var tab = DevToolsTabItem(id: UUID(), tool: tool, title: number == 1 ? tool.name : "\(tool.name) \(number)")
+        tab.launch = makeLaunch(tool)
         tabs.append(tab)
         activeTabID = tab.id
     }
@@ -357,13 +412,12 @@ struct DevToolsPanelView: View {
 
     @ViewBuilder
     private func content(for tab: DevToolsTabItem) -> some View {
-        if isInstalled(tab.tool) == false {
-            missingPlaceholder(tab.tool)
-        } else if isInstalled(tab.tool) == true {
+        if let launch = tab.launch {
             ZStack {
                 PTYTerminalView(
                     executablePath: DevToolLocator.shell,
-                    arguments: DevToolLocator.launchArguments(for: tab.tool),
+                    arguments: launch.arguments,
+                    environment: launch.environment,
                     currentDirectory: NSHomeDirectory(),
                     onProcessTerminated: { code in
                         updateTab(tab.id) {
@@ -376,14 +430,18 @@ struct DevToolsPanelView: View {
 
                 if tab.ended {
                     endedOverlay(exitCode: tab.exitCode) {
+                        let launch = makeLaunch(tab.tool)
                         updateTab(tab.id) {
                             $0.ended = false
                             $0.exitCode = nil
+                            $0.launch = launch
                             $0.ptySessionID = UUID()
                         }
                     }
                 }
             }
+        } else if isInstalled(tab.tool) == false {
+            missingPlaceholder(tab.tool)
         } else {
             ProgressView().frame(maxWidth: .infinity, maxHeight: .infinity)
         }
@@ -396,10 +454,13 @@ struct DevToolsPanelView: View {
                 .foregroundStyle(.secondary)
             Text("\(tool.name) isn't installed")
                 .font(.callout.bold())
-            if let binary = tool.binary {
-                Text("`\(binary)` wasn't found in your login shell's PATH.")
+            if !tool.binaries.isEmpty {
+                Text("\(tool.binaries.map { "`\($0)`" }.joined(separator: " or ")) wasn't found in your shell's PATH or the usual install folders (~/.local/bin, Homebrew, nvm, npm-global, ~/.claude/local).")
                     .font(.caption)
                     .foregroundStyle(.secondary)
+                    .multilineTextAlignment(.center)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .padding(.horizontal, 24)
             }
             if let url = tool.installURL {
                 DownloadButton("Install \(tool.name)") {
@@ -407,7 +468,7 @@ struct DevToolsPanelView: View {
                 }
             }
             SecondaryButton("Check again") {
-                Task { installed = await DevToolLocator.installed(tools.compactMap(\.binary)) }
+                Task { await checkInstalled(fresh: true) }
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)

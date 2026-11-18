@@ -27,14 +27,16 @@ struct DashboardCardEditor: View {
     @State private var preview: CardPreviewView.Phase = .waiting
     @State private var previewNonce = 0
 
-    init(card: DashboardCard?, language: AppLanguage, profiles: [String], defaultProfile: String, defaultRegion: String, onSave: @escaping (DashboardCard) -> Void, onCancel: @escaping () -> Void) {
+    /// `presetService`: a new card for that service (the sidebar's "Add to
+    /// Dashboard Cards…") - the editor starts at the card type step.
+    init(card: DashboardCard?, presetService: String? = nil, language: AppLanguage, profiles: [String], defaultProfile: String, defaultRegion: String, onSave: @escaping (DashboardCard) -> Void, onCancel: @escaping () -> Void) {
         isNew = card == nil
         self.language = language
         self.profiles = profiles
         self.onSave = onSave
         self.onCancel = onCancel
-        _draft = State(initialValue: card ?? DashboardCard(profiles: [defaultProfile]))
-        _choosingService = State(initialValue: card == nil)
+        _draft = State(initialValue: card ?? DashboardCard(service: presetService ?? "", profiles: [defaultProfile]))
+        _choosingService = State(initialValue: card == nil && (presetService ?? "").isEmpty)
     }
 
     private var template: CardTemplate? { templates.first { $0.id == draft.template } }

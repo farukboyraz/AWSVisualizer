@@ -9,6 +9,7 @@ protocol APIServiceProtocol {
     func getCallerIdentity(profile: String, region: String) async throws -> CallerIdentity
     func getAccessibleEnvironments() async throws -> [AccessibleEnvironment]
     func createProfile(name: String, ssoSessionName: String, accountId: String, roleName: String, region: String) async throws
+    func deleteProfile(name: String) async throws
 
     // Service Catalog
     func getServiceCatalog() async throws -> [AWSServiceCatalogEntry]
